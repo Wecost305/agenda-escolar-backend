@@ -120,6 +120,45 @@ def registrar_asistencia():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# 3. RUTA PARA JALAR ALUMOS DESDE NOTION AL FORMULARIO
+# ==========================================
+@app.route('/obtener-alumnos', methods=['GET'])
+def obtener_alumnos():
+    try:
+        url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+        
+        # Le pedimos a Notion que ordene los nombres alfabéticamente
+        payload = {
+            "sorts": [
+                {
+                    "property": "Nombre Completo",
+                    "direction": "ascending"
+                }
+            ]
+        }
+        
+        response = requests.post(url, headers=NOTION_HEADERS, json=payload)
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"Error de Notion: {response.text}"}), response.status_code
+            
+        data = response.json()
+        nombres = []
+        
+        # Extraemos solo el texto limpio del nombre de cada fila
+        for result in data.get("results", []):
+            propiedades = result.get("properties", {})
+            nombre_prop = propiedades.get("Nombre Completo", {}).get("title", [])
+            if nombre_prop:
+                nombres.append(nombre_prop[0]["text"]["content"])
+                
+        return jsonify({"alumnos": nombres}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     # Render asigna el puerto automáticamente mediante la variable PORT
     port = int(os.environ.get("PORT", 5000))
