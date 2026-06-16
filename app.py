@@ -40,7 +40,10 @@ def cargar_alumnos():
             # Formateamos la fecha de nacimiento para que Notion la acepte (YYYY-MM-DD)
             fecha_nac = str(row['Fecha_Nacimiento']).split(" ")[0] if pd.notna(row['Fecha_Nacimiento']) else None
             
-            # Construimos el JSON con la estructura demográfica completa de tu Notion
+            # Convertimos teléfono a string limpio si existe
+            tel_contacto = str(int(row['Telefono'])) if pd.notna(row['Telefono']) and str(row['Telefono']).replace('.0','').isdigit() else str(row['Telefono']) if pd.notna(row['Telefono']) else None
+
+            # Construimos el JSON con la estructura EXACTA de tu captura de Notion
             payload = {
                 "parent": { "database_id": DATABASE_ID },
                 "properties": {
@@ -55,10 +58,10 @@ def cargar_alumnos():
                         ]
                     },
                     "Género": {
-                        "select": { "name": str(row['Genero']) }  # Tipo Select
+                        "select": { "name": str(row['Genero']) }
                     },
                     "Fecha de Nacimiento": {
-                        "date": { "start": fecha_nac } if fecha_nac else None  # Tipo Date
+                        "date": { "start": fecha_nac } if fecha_nac else None
                     },
                     "Nombre del Tutor": {
                         "rich_text": [
@@ -66,10 +69,16 @@ def cargar_alumnos():
                         ]
                     },
                     "Teléfono de Contacto": {
-                        "phone_number": str(row['Telefono']) if pd.notna(row['Telefono']) else None  # Tipo Phone
+                        "phone_number": tel_contacto if tel_contacto else None
+                    },
+                    "Correo Electrónico": {
+                        "email": str(row['Correo']) if pd.notna(row['Correo']) else None  # Tipo Email de Notion
+                    },
+                    "Estatus": {
+                        "select": { "name": str(row['Estatus']) } if pd.notna(row['Estatus']) else { "name": "Activo" } # Tipo Select / Status
                     },
                     "Total Faltas T1": {
-                        "number": 0  # Iniciamos asistencia en ceros
+                        "number": 0
                     }
                 }
             }
@@ -78,7 +87,7 @@ def cargar_alumnos():
             if response.status_code != 200:
                 print(f"Error con el alumno {row['Nombre_Completo']}: {response.text}")
                 
-        return jsonify({"status": "éxito", "mensaje": "Alumnos cargados con datos demográficos en Notion"}), 200
+        return jsonify({"status": "éxito", "mensaje": "Alumnos cargados con estructura completa en Notion"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
