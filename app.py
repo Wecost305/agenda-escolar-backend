@@ -18,7 +18,7 @@ NOTION_HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
-@app.route('/', sorted_methods=['GET'])
+@app.route('/', methods=['GET'])
 def home():
     return "Servidor de la Agenda Escolar 2026-2027 Activo y Corriendo.", 200
 
