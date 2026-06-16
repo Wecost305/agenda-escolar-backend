@@ -28,18 +28,19 @@ def home():
 @app.route('/cargar-alumnos', methods=['POST'])
 def cargar_alumnos():
     try:
-        # Verificamos si viene el archivo de Excel en la petición
         if 'file' not in request.files:
             return jsonify({"error": "No se encontró ningún archivo Excel"}), 400
             
         file = request.files['file']
         df = pd.read_excel(file)
         
-        # Iteramos cada fila del Excel para subirla a Notion
         for index, row in df.iterrows():
             url = "https://api.notion.com/v1/pages"
             
-            # Construimos el JSON con la estructura exacta de tus columnas de Notion
+            # Formateamos la fecha de nacimiento para que Notion la acepte (YYYY-MM-DD)
+            fecha_nac = str(row['Fecha_Nacimiento']).split(" ")[0] if pd.notna(row['Fecha_Nacimiento']) else None
+            
+            # Construimos el JSON con la estructura demográfica completa de tu Notion
             payload = {
                 "parent": { "database_id": DATABASE_ID },
                 "properties": {
@@ -53,21 +54,34 @@ def cargar_alumnos():
                             { "text": { "content": str(row['CURP']) } }
                         ]
                     },
+                    "Género": {
+                        "select": { "name": str(row['Genero']) }  # Tipo Select
+                    },
+                    "Fecha de Nacimiento": {
+                        "date": { "start": fecha_nac } if fecha_nac else None  # Tipo Date
+                    },
+                    "Nombre del Tutor": {
+                        "rich_text": [
+                            { "text": { "content": str(row['Nombre_Tutor']) if pd.notna(row['Nombre_Tutor']) else "" } }
+                        ]
+                    },
+                    "Teléfono de Contacto": {
+                        "phone_number": str(row['Telefono']) if pd.notna(row['Telefono']) else None  # Tipo Phone
+                    },
                     "Total Faltas T1": {
-                        "number": 0  # Iniciamos el ciclo escolar con cero faltas
+                        "number": 0  # Iniciamos asistencia en ceros
                     }
                 }
             }
-            # Enviamos el alumno a Notion
+            
             response = requests.post(url, headers=NOTION_HEADERS, json=payload)
             if response.status_code != 200:
-                print(f"Error al subir a: {row['Nombre_Completo']}: {response.text}")
+                print(f"Error con el alumno {row['Nombre_Completo']}: {response.text}")
                 
-        return jsonify({"status": "éxito", "mensaje": "Alumnos cargados en Notion correctamente"}), 200
+        return jsonify({"status": "éxito", "mensaje": "Alumnos cargados con datos demográficos en Notion"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 # ==========================================
 # 2. RUTA PARA RECIBIR EL PASE DE LISTA DESDE NETLIFY
 # ==========================================
