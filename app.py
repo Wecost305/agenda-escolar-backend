@@ -11,6 +11,9 @@ CORS(app)
 # Configuración de Notion (Se cargan de forma segura desde las variables del servidor)
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+# IDs de tus Bases de Datos de Notion
+DATABASE_ALUMNOS_ID = "tu_id_de_la_tabla_alumnos"  # La que ya tenías
+DATABASE_ASISTENCIAS_ID = "PEGA_AQUÍ_EL_NUEVO_ID_DE_DIARIO_DE_ASISTENCIAS"
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -97,48 +100,82 @@ def cargar_alumnos():
 @app.route('/registrar-asistencia', methods=['POST'])
 def registrar_asistencia():
     try:
-        datos = request.json  # Recibe el JSON de Netlify
+        datos = request.json
         fecha = datos.get("fecha")
-        reporte_alumnos = datos.get("alumnos") # Lista de alumnos con su estatus y motivos
+        alumnos_lista = datos.get("alumnos", [])
+
+        # 1. Traemos los alumnos de Notion para mapear sus Nombres con sus IDs internos (Page IDs)
+        url_query = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
+        response_query = requests.post(url_query, headers=NOTION_HEADERS)
         
-        for alumno in reporte_alumnos:
-            nombre = alumno.get("nombre")
-            estatus = alumno.get("estatus")       # "Presente" o "Falta"
-            motivo = alumno.get("motivo", "")      # "Enfermedad", "Injustificada", etc.
-            nota = alumno.get("nota", "")          # Comentarios del maestro
+        if response_query.status_code != 200:
+            return jsonify({"error": "No se pudo consultar la base de datos de alumnos"}), 500
             
-            # Si el alumno faltó, buscamos su registro en Notion y le sumamos 1 falta
+        resultados = response_query.json().get("results", [])
+        
+        # Creamos un diccionario { "Nombre Completo": "page_id_de_notion" }
+        mapa_alumnos = {}
+        for alum in resultados:
+            props = alum.get("properties", {})
+            nombre_tit = props.get("Nombre Completo", {}).get("title", [])
+            if nombre_tit:
+                nombre_txt = nombre_tit[0]["text"]["content"]
+                mapa_alumnos[nombre_txt] = alum.get("id")
+
+        # 2. Procesamos cada alumno enviado desde el Frontend
+        for alumno in alumnos_lista:
+            estatus = alumno.get("estatus")
+            nombre_alumno = alumno.get("nombre")
+            
+            # Si el alumno está "Presente", no creamos registro de falta para no saturar la BD. 
+            # Solo registramos si es "Falta" (o puedes quitar esta condición si quieres guardar también las asistencias)
             if estatus == "Falta":
-                # Primero buscamos al alumno por nombre para obtener su ID de página de Notion
-                search_url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
-                search_payload = {
-                    "filter": {
-                        "property": "Nombre Completo",
-                        "title": { "equals": nombre }
-                    }
-                }
-                search_res = requests.post(search_url, headers=NOTION_HEADERS, json=search_payload).json()
+                alumno_page_id = mapa_alumnos.get(nombre_alumno)
                 
-                if search_res.get("results"):
-                    page_id = search_res["results"][0]["id"]
-                    # Leemos cuántas faltas tiene actualmente acumuladas
-                    faltas_actuales = search_res["results"][0]["properties"]["Total Faltas T1"].get("number", 0) or 0
-                    
-                    # Actualizamos sumándole la nueva falta
-                    update_url = f"https://api.notion.com/v1/pages/{page_id}"
-                    update_payload = {
-                        "properties": {
-                            "Total Faltas T1": {
-                                "number": faltas_actuales + 1
-                            }
+                if not alumno_page_id:
+                    print(f"Advertencia: No se encontró el Page ID para {nombre_alumno}")
+                    continue
+
+                motivo = alumno.get("motivo", "Injustificada")
+                nota = alumno.get("nota", "")
+
+                # Armamos el Payload relacional para la BD de Diario de Asistencias
+                url_crear = "https://api.notion.com/v1/pages"
+                payload_asistencia = {
+                    "parent": { "database_id": DATABASE_ASISTENCIAS_ID },
+                    "properties": {
+                        "Registro": {
+                            "title": [
+                                { "text": { "content": f"Falta - {fecha}" } }
+                            ]
+                        },
+                        "Alumno": {
+                            "relation": [
+                                { "id": alumno_page_id }  # Aquí se hace la magia de la relación
+                            ]
+                        },
+                        "Fecha": {
+                            "date": { "start": fecha }
+                        },
+                        "Estatus Asistencia": {
+                            "select": { "name": "Falta" }
+                        },
+                        "Motivo Falta": {
+                            "select": { "name": motivo }
+                        },
+                        "Nota / Observación": {
+                            "rich_text": [
+                                { "text": { "content": nota } }
+                            ]
                         }
                     }
-                    requests.patch(update_url, headers=NOTION_HEADERS, json=update_payload)
-                    
-                    # Aquí opcionalmente podemos crear un registro en otra tabla de bitácora
-                    # guardando el "motivo" y la "nota" para que quede el historial detallado.
-                    
-        return jsonify({"status": "éxito", "mensaje": "Asistencias procesadas en Notion"}), 200
+                }
+                
+                res_crear = requests.post(url_crear, headers=NOTION_HEADERS, json=payload_asistencia)
+                if res_crear.status_code != 200:
+                    print(f"Error al registrar falta de {nombre_alumno}: {res_crear.text}")
+
+        return jsonify({"status": "éxito", "mensaje": "Pase de lista relacional procesado correctamente"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
