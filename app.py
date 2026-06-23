@@ -209,7 +209,6 @@ def generar_reportes():
         cct_val = props_grupo.get("CCT", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
         turno_val = props_grupo.get("Turno", {}).get("select", {}).get("name", "MATUTINO")
         grado_val = props_grupo.get("Grado y Grupo", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "1° A")
-        maestro_name = props_grupo.get("Nombre del Maestro", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
 
         # 2. Consultar únicamente alumnos del grupo seleccionado
         url_alumnos = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
@@ -264,8 +263,6 @@ def generar_reportes():
                 t2_prom = (t2_l + t2_s + t2_e + t2_h) / 4 if (t2_l or t2_s or t2_e or t2_h) else 0.0
                 t3_prom = (t3_l + t3_s + t3_e + t3_h) / 4 if (t3_l or t3_s or t3_e or t3_h) else 0.0
 
-                # --- CORRECCIÓN MATEMÁTICA DEFINITIVA ---
-                # Calculamos los promedios finales por campo omitiendo periodos con 0.0
                 def calcular_promedio_final_campo(notas_periodos):
                     validas = [n for n in notas_periodos if n > 0]
                     return sum(validas) / len(validas) if validas else 0.0
@@ -275,7 +272,6 @@ def generar_reportes():
                 f_e = calcular_promedio_final_campo([t1_e, t2_e, t3_e])
                 f_h = calcular_promedio_final_campo([t1_h, t2_h, t3_h])
 
-                # Promedio final cruzado real de grado
                 promedios_trimestres_validos = [p for p in [t1_prom, t2_prom, t3_prom] if p > 0]
                 promedio_final_grado = sum(promedios_trimestres_validos) / len(promedios_trimestres_validos) if promedios_trimestres_validos else 0.0
 
@@ -285,40 +281,58 @@ def generar_reportes():
                 story = []
                 styles = getSampleStyleSheet()
                 
-                # Estilos visuales
-                style_sep_box = ParagraphStyle('SepBox', fontName='Helvetica-Bold', fontSize=14, textColor=colors.white, alignment=1)
-                style_sub_sep = ParagraphStyle('SubSepStyle', fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor('#621132'))
-                style_sistema = ParagraphStyle('SistStyle', fontName='Helvetica-Bold', fontSize=11, textColor=colors.HexColor('#1e293b'), alignment=1)
+                # Definición de tipografía y estilos institucionales
+                style_sep_izq = ParagraphStyle('SepIzq', fontName='Helvetica-Bold', fontSize=24, textColor=colors.HexColor('#621132'))
+                style_sep_sub = ParagraphStyle('SepSub', fontName='Helvetica', fontSize=7.5, textColor=colors.HexColor('#64748b'))
+                
+                style_sistema = ParagraphStyle('SistStyle', fontName='Helvetica-Bold', fontSize=10.5, textColor=colors.HexColor('#475569'), alignment=1, leading=14)
+                
+                style_edomex_der = ParagraphStyle('EdomexDer', fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#334155'), alignment=2)
+                style_edomex_sub = ParagraphStyle('EdomexSub', fontName='Helvetica', fontSize=6.5, textColor=colors.HexColor('#64748b'), alignment=2)
+                
                 style_label = ParagraphStyle('LabelStyle', fontName='Helvetica', fontSize=8, textColor=colors.HexColor('#475569'))
                 style_value = ParagraphStyle('ValueStyle', fontName='Helvetica-Bold', fontSize=9, textColor=colors.black)
                 style_th = ParagraphStyle('ThStyle', fontName='Helvetica-Bold', fontSize=7, textColor=colors.HexColor('#78350f'), alignment=1)
                 style_td = ParagraphStyle('TdStyle', fontName='Helvetica', fontSize=9, alignment=1)
                 style_td_bold = ParagraphStyle('TdBoldStyle', fontName='Helvetica-Bold', fontSize=9, alignment=1)
 
-                # DISEÑO DEL ESCUDO INSTITUCIONAL VECTORIAL (TABLA SIMULADA)
-                escudo_vectorial = Table([[Paragraph("EDUCACIÓN", style_sep_box)]], colWidths=[120], rowHeights=[28])
-                escudo_vectorial.setStyle(TableStyle([
-                    ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#621132')),
-                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                ]))
-
+                # 3 COLUMNAS DEL ENCABEZADO OFICIAL
                 header_data = [
-                    [escudo_vectorial, Paragraph(f"SISTEMA EDUCATIVO NACIONAL<br/><b>ESTADO DE MÉXICO</b><br/>BOLETA DE EVALUACIÓN<br/>{grado_val} DE EDUCACIÓN PRIMARIA<br/>CICLO ESCOLAR 2026-2027", style_sistema)],
-                    [Paragraph("SECRETARÍA DE EDUCACIÓN PÚBLICA", style_sub_sep), Paragraph("", style_sistema)]
+                    [
+                        Paragraph("Educación", style_sep_izq),
+                        Paragraph("SISTEMA EDUCATIVO NACIONAL<br/><b>ESTADO DE MÉXICO</b><br/>BOLETA DE EVALUACIÓN<br/><b>" + grado_val + " DE EDUCACIÓN PRIMARIA</b><br/>CICLO ESCOLAR 2026-2027", style_sistema),
+                        Paragraph("EDUCACIÓN", style_edomex_der)
+                    ],
+                    [
+                        Paragraph("Secretaría de Educación Pública", style_sep_sub),
+                        Paragraph("", style_sistema),
+                        Paragraph("SECRETARÍA DE EDUCACIÓN, CIENCIA, TECNOLOGÍA E INNOVACIÓN", style_edomex_sub)
+                    ]
                 ]
-                t_header = Table(header_data, colWidths=[200, 520])
-                t_header.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('ALIGN', (0,0), (0,0), 'LEFT')]))
+                t_header = Table(header_data, colWidths=[200, 320, 200])
+                t_header.setStyle(TableStyle([
+                    ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                    ('ALIGN', (0,0), (0,1), 'LEFT'),
+                    ('ALIGN', (1,0), (1,1), 'CENTER'),
+                    ('ALIGN', (2,0), (2,1), 'RIGHT'),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                ]))
                 story.append(t_header)
                 story.append(Spacer(1, 15))
 
-                # GRID DE DATOS REDISEÑADO CON ETIQUETAS CORTAS Y MAESTRO
+                # GRID DE DATOS SIN EL PROFESOR (IGUAL AL ORIGINAL)
                 datos_alumno_grid = [
-                    [Paragraph("ALUMNO(A):", style_label), Paragraph(nombre, style_value), Paragraph("CURP:", style_label), Paragraph(curp, style_value)],
-                    [Paragraph(f"ESCUELA: {escuela_name}", style_label), Paragraph(f"PROFESOR(A): {maestro_name}", style_label), Paragraph(f"CCT: {cct_val}", style_label), Paragraph(f"TURNO: {turno_val}", style_label)]
+                    [Paragraph("NOMBRE(S) Y APELLIDOS DE LA ALUMNA O DEL ALUMNO:", style_label), Paragraph(nombre, style_value), Paragraph("CURP:", style_label), Paragraph(curp, style_value)],
+                    [Paragraph(f"NOMBRE DE LA ESCUELA: {escuela_name}", style_label), Paragraph("", style_label), Paragraph(f"CCT: {cct_val}", style_label), Paragraph(f"TURNO: {turno_val}", style_label)]
                 ]
-                t_alumno = Table(datos_alumno_grid, colWidths=[90, 310, 100, 220])
-                t_alumno.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('LINEBELOW', (1,0), (1,0), 0.5, colors.black), ('LINEBELOW', (3,0), (3,0), 0.5, colors.black), ('PADDING', (0,0), (-1,-1), 4)]))
+                t_alumno = Table(datos_alumno_grid, colWidths=[240, 240, 70, 170])
+                t_alumno.setStyle(TableStyle([
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('LINEBELOW', (1,0), (1,0), 0.5, colors.black),
+                    ('LINEBELOW', (3,0), (3,0), 0.5, colors.black),
+                    ('SPAN', (0,1), (1,1)),
+                    ('PADDING', (0,0), (-1,-1), 4)
+                ]))
                 story.append(t_alumno)
                 story.append(Spacer(1, 15))
 
