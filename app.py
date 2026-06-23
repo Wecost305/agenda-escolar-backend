@@ -220,13 +220,25 @@ def generar_reportes():
         res_proyectos = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_PROYECTOS_ID}/query", headers=NOTION_HEADERS)
         proyectos_lista = res_proyectos.json().get("results", []) if res_proyectos.status_code == 200 else []
 
-        historico_notas = {}
+historico_notas = {}
         for proy in proyectos_lista:
             props = proy.get("properties", {})
             relacion_alumno = props.get("Alumno", {}).get("relation", [])
             if not relacion_alumno: continue
             alum_id = relacion_alumno[0].get("id")
-            periodo = props.get("Periodo", {}).get("select", {}).get("name", "Trimestre 1")
+            
+            # Extraemos el texto del periodo crudo
+            periodo_raw = props.get("Periodo", {}).get("select", {}).get("name", "Trimestre 1")
+            
+            # Determinamos el periodo real buscando la palabra clave
+            if "Trimestre 1" in periodo_raw:
+                periodo = "Trimestre 1"
+            elif "Trimestre 2" in periodo_raw:
+                periodo = "Trimestre 2"
+            elif "Trimestre 3" in periodo_raw:
+                periodo = "Trimestre 3"
+            else:
+                periodo = "Trimestre 1" # Por defecto
             
             if alum_id not in historico_notas:
                 historico_notas[alum_id] = {
@@ -234,15 +246,17 @@ def generar_reportes():
                     "Trimestre 2": {"L": [], "S": [], "E": [], "H": []},
                     "Trimestre 3": {"L": [], "S": [], "E": [], "H": []}
                 }
-            if periodo in historico_notas[alum_id]:
-                l_nota = props.get("Lenguajes", {}).get("number")
-                s_nota = props.get("Saberes y Ciencias", {}).get("number")
-                e_nota = props.get("Ética, Nat y Soc", {}).get("number")
-                h_nota = props.get("De lo Humano y Com", {}).get("number")
-                if l_nota is not None: historico_notas[alum_id][periodo]["L"].append(l_nota)
-                if s_nota is not None: historico_notas[alum_id][periodo]["S"].append(s_nota)
-                if e_nota is not None: historico_notas[alum_id][periodo]["E"].append(e_nota)
-                if h_nota is not None: historico_notas[alum_id][periodo]["H"].append(h_nota)
+                
+            # El resto del código de extracción se queda exactamente igual:
+            l_nota = props.get("Lenguajes", {}).get("number")
+            s_nota = props.get("Saberes y Ciencias", {}).get("number")
+            e_nota = props.get("Ética, Nat y Soc", {}).get("number")
+            h_nota = props.get("De lo Humano y Com", {}).get("number")
+            
+            if l_nota is not None: historico_notas[alum_id][periodo]["L"].append(l_nota)
+            if s_nota is not None: historico_notas[alum_id][periodo]["S"].append(s_nota)
+            if e_nota is not None: historico_notas[alum_id][periodo]["E"].append(e_nota)
+            if h_nota is not None: historico_notas[alum_id][periodo]["H"].append(h_nota)
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
