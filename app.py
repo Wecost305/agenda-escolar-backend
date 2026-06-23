@@ -20,7 +20,7 @@ NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
 DATABASE_ALUMNOS_ID = os.environ.get('NOTION_DATABASE_ID')
 DATABASE_ASISTENCIAS_ID = os.environ.get('DATABASE_ASISTENCIAS_ID')
 DATABASE_PROYECTOS_ID = os.environ.get('DATABASE_PROYECTOS_ID')
-DATABASE_GRUPOS_ID = os.environ.get('DATABASE_GRUPOS_ID')  # <- NUEVA VARIABLE
+DATABASE_GRUPOS_ID = os.environ.get('DATABASE_GRUPOS_ID')
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -41,7 +41,7 @@ def home():
     return "Servidor Multiescuela de la Agenda Escolar Activo.", 200
 
 # ==========================================
-# NUEVA RUTA: OBTENER LOS GRUPOS CONFIGURADOS
+# RUTA: OBTENER LOS GRUPOS CONFIGURADOS
 # ==========================================
 @app.route('/obtener-grupos', methods=['GET'])
 def obtener_grupos():
@@ -78,7 +78,6 @@ def obtener_alumnos():
         grupo_id = request.args.get('grupo_id')
         url = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
         
-        # Si mandan un grupo_id, filtramos relacionalmente en Notion
         payload = {"sorts": [{"property": "Nombre Completo", "direction": "ascending"}]}
         if grupo_id:
             payload["filter"] = {
@@ -220,7 +219,7 @@ def generar_reportes():
         res_proyectos = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_PROYECTOS_ID}/query", headers=NOTION_HEADERS)
         proyectos_lista = res_proyectos.json().get("results", []) if res_proyectos.status_code == 200 else []
 
-historico_notas = {}
+        historico_notas = {}
         for proy in proyectos_lista:
             props = proy.get("properties", {})
             relacion_alumno = props.get("Alumno", {}).get("relation", [])
@@ -247,7 +246,6 @@ historico_notas = {}
                     "Trimestre 3": {"L": [], "S": [], "E": [], "H": []}
                 }
                 
-            # El resto del código de extracción se queda exactamente igual:
             l_nota = props.get("Lenguajes", {}).get("number")
             s_nota = props.get("Saberes y Ciencias", {}).get("number")
             e_nota = props.get("Ética, Nat y Soc", {}).get("number")
@@ -295,14 +293,11 @@ historico_notas = {}
                 story = []
                 styles = getSampleStyleSheet()
                 
-                # Definición de tipografía y estilos institucionales
                 style_sep_izq = ParagraphStyle('SepIzq', fontName='Helvetica-Bold', fontSize=24, textColor=colors.HexColor('#621132'))
                 style_sep_sub = ParagraphStyle('SepSub', fontName='Helvetica', fontSize=7.5, textColor=colors.HexColor('#64748b'))
-                
                 style_sistema = ParagraphStyle('SistStyle', fontName='Helvetica-Bold', fontSize=10.5, textColor=colors.HexColor('#475569'), alignment=1, leading=14)
-                
                 style_edomex_der = ParagraphStyle('EdomexDer', fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#334155'), alignment=2)
-                style_edomex_sub = ParagraphStyle('EdomexSub', fontName='Helvetica', fontSize=6.5, textColor=colors.HexColor('#64748b'), alignment=2)
+                style_edomex_sub = ParagraphStyle('EdomexSub', fontName='Helvetica', fontSize=6.5, textColor=colors.HexColor('#64748b'), alignment=2, leading=9)
                 
                 style_label = ParagraphStyle('LabelStyle', fontName='Helvetica', fontSize=8, textColor=colors.HexColor('#475569'))
                 style_value = ParagraphStyle('ValueStyle', fontName='Helvetica-Bold', fontSize=9, textColor=colors.black)
@@ -310,7 +305,6 @@ historico_notas = {}
                 style_td = ParagraphStyle('TdStyle', fontName='Helvetica', fontSize=9, alignment=1)
                 style_td_bold = ParagraphStyle('TdBoldStyle', fontName='Helvetica-Bold', fontSize=9, alignment=1)
 
-                # 3 COLUMNAS DEL ENCABEZADO OFICIAL
                 header_data = [
                     [
                         Paragraph("Educación", style_sep_izq),
@@ -334,7 +328,6 @@ historico_notas = {}
                 story.append(t_header)
                 story.append(Spacer(1, 15))
 
-                # GRID DE DATOS SIN EL PROFESOR (IGUAL AL ORIGINAL)
                 datos_alumno_grid = [
                     [Paragraph("NOMBRE(S) Y APELLIDOS DE LA ALUMNA O DEL ALUMNO:", style_label), Paragraph(nombre, style_value), Paragraph("CURP:", style_label), Paragraph(curp, style_value)],
                     [Paragraph(f"NOMBRE DE LA ESCUELA: {escuela_name}", style_label), Paragraph("", style_label), Paragraph(f"CCT: {cct_val}", style_label), Paragraph(f"TURNO: {turno_val}", style_label)]
