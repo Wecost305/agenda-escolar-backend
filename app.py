@@ -197,7 +197,7 @@ def generar_reportes():
         if not grupo_id:
             return jsonify({"error": "Debe especificar un grupo_id"}), 400
 
-        # 1. Traer configuración del grupo desde Notion
+        # 1. Traer configuración del grupo desde Notion (Escuela, CCT, Turno y Ciclo Escolar)
         url_grupo = f"https://api.notion.com/v1/pages/{grupo_id}"
         res_grupo = requests.get(url_grupo, headers=NOTION_HEADERS)
         if res_grupo.status_code != 200:
@@ -208,6 +208,8 @@ def generar_reportes():
         cct_val = props_grupo.get("CCT", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
         turno_val = props_grupo.get("Turno", {}).get("select", {}).get("name", "MATUTINO")
         grado_val = props_grupo.get("Grado y Grupo", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "1° A")
+        # NUEVO: Ciclo Escolar dinámico desde Notion
+        ciclo_val = props_grupo.get("Ciclo Escolar", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "2026-2027")
 
         # 2. Consultar únicamente alumnos del grupo seleccionado
         url_alumnos = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
@@ -215,7 +217,25 @@ def generar_reportes():
         res_alumnos = requests.post(url_alumnos, headers=NOTION_HEADERS, json=payload_alumnos)
         alumnos_notion = res_alumnos.json().get("results", [])
 
-        # 3. Consultar proyectos para los promedios reales
+        # 3. Consultar la base de datos de asistencias completa para contar los días "Presente"
+        res_asistencias = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_ASISTENCIAS_ID}/query", headers=NOTION_HEADERS)
+        asistencias_lista = res_asistencias.json().get("results", []) if res_asistencias.status_code == 200 else []
+
+        # Contabilizar asistencias reales por cada alumno
+        mapa_asistencias = {}
+        for asis in asistencias_lista:
+            props_asis = asis.get("properties", {})
+            rel_alum = props_asis.get("Alumno", {}).get("relation", [])
+            if not rel_alum: continue
+            alum_id_asis = rel_alum[0].get("id")
+            
+            estatus_asis = props_asis.get("Estatus Asistencia", {}).get("select", {}).get("name", "")
+            
+            # Si el alumno asistió, sumamos 1 día al contador
+            if "Presente" in estatus_asis:
+                mapa_asistencias[alum_id_asis] = mapa_asistencias.get(alum_id_asis, 0) + 1
+
+        # 4. Consultar proyectos para los promedios reales
         res_proyectos = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_PROYECTOS_ID}/query", headers=NOTION_HEADERS)
         proyectos_lista = res_proyectos.json().get("results", []) if res_proyectos.status_code == 200 else []
 
@@ -226,18 +246,11 @@ def generar_reportes():
             if not relacion_alumno: continue
             alum_id = relacion_alumno[0].get("id")
             
-            # Extraemos el texto del periodo crudo
             periodo_raw = props.get("Periodo", {}).get("select", {}).get("name", "Trimestre 1")
-            
-            # Determinamos el periodo real buscando la palabra clave
-            if "Trimestre 1" in periodo_raw:
-                periodo = "Trimestre 1"
-            elif "Trimestre 2" in periodo_raw:
-                periodo = "Trimestre 2"
-            elif "Trimestre 3" in periodo_raw:
-                periodo = "Trimestre 3"
-            else:
-                periodo = "Trimestre 1" # Por defecto
+            if "Trimestre 1" in periodo_raw: periodo = "Trimestre 1"
+            elif "Trimestre 2" in periodo_raw: periodo = "Trimestre 2"
+            elif "Trimestre 3" in periodo_raw: periodo = "Trimestre 3"
+            else: periodo = "Trimestre 1"
             
             if alum_id not in historico_notas:
                 historico_notas[alum_id] = {
@@ -263,6 +276,9 @@ def generar_reportes():
                 nombre = alum.get("properties", {}).get("Nombre Completo", {}).get("title", [{}])[0].get("text", {}).get("content", "ALUMNO")
                 curp = alum.get("properties", {}).get("CURP", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
 
+                # Obtener asistencias reales calculadas para este alumno (si no tiene, por defecto es 0)
+                total_asistencias_real = mapa_asistencias.get(alum_id, 0)
+
                 def promediar(lista): return sum(lista) / len(lista) if lista else 0.0
 
                 notas_alum = historico_notas.get(alum_id, {"Trimestre 1": {"L": [], "S": [], "E": [], "H": []}, "Trimestre 2": {"L": [], "S": [], "E": [], "H": []}, "Trimestre 3": {"L": [], "S": [], "E": [], "H": []}})
@@ -287,7 +303,7 @@ def generar_reportes():
                 promedios_trimestres_validos = [p for p in [t1_prom, t2_prom, t3_prom] if p > 0]
                 promedio_final_grado = sum(promedios_trimestres_validos) / len(promedios_trimestres_validos) if promedios_trimestres_validos else 0.0
 
-                # --- REPORTE PDF HORIZONTAL (LANDSCAPE) ---
+                # --- GENERAR CUERPO DEL REPORTE PDF ---
                 pdf_buffer = io.BytesIO()
                 doc = SimpleDocTemplate(pdf_buffer, pagesize=landscape(letter), rightMargin=30, leftMargin=30, topMargin=25, bottomMargin=25)
                 story = []
@@ -308,7 +324,7 @@ def generar_reportes():
                 header_data = [
                     [
                         Paragraph("Educación", style_sep_izq),
-                        Paragraph("SISTEMA EDUCATIVO NACIONAL<br/><b>ESTADO DE MÉXICO</b><br/>BOLETA DE EVALUACIÓN<br/><b>" + grado_val + " DE EDUCACIÓN PRIMARIA</b><br/>CICLO ESCOLAR 2026-2027", style_sistema),
+                        Paragraph(f"SISTEMA EDUCATIVO NACIONAL<br/><b>ESTADO DE MÉXICO</b><br/>BOLETA DE EVALUACIÓN<br/><b>{grado_val} DE EDUCACIÓN PRIMARIA</b><br/>CICLO ESCOLAR {ciclo_val}", style_sistema),
                         Paragraph("EDUCACIÓN", style_edomex_der)
                     ],
                     [
@@ -318,13 +334,7 @@ def generar_reportes():
                     ]
                 ]
                 t_header = Table(header_data, colWidths=[200, 320, 200])
-                t_header.setStyle(TableStyle([
-                    ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                    ('ALIGN', (0,0), (0,1), 'LEFT'),
-                    ('ALIGN', (1,0), (1,1), 'CENTER'),
-                    ('ALIGN', (2,0), (2,1), 'RIGHT'),
-                    ('BOTTOMPADDING', (0,0), (-1,-1), 2),
-                ]))
+                t_header.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('ALIGN', (0,0), (0,1), 'LEFT'), ('ALIGN', (1,0), (1,1), 'CENTER'), ('ALIGN', (2,0), (2,1), 'RIGHT'), ('BOTTOMPADDING', (0,0), (-1,-1), 2)]))
                 story.append(t_header)
                 story.append(Spacer(1, 15))
 
@@ -333,13 +343,7 @@ def generar_reportes():
                     [Paragraph(f"NOMBRE DE LA ESCUELA: {escuela_name}", style_label), Paragraph("", style_label), Paragraph(f"CCT: {cct_val}", style_label), Paragraph(f"TURNO: {turno_val}", style_label)]
                 ]
                 t_alumno = Table(datos_alumno_grid, colWidths=[240, 240, 70, 170])
-                t_alumno.setStyle(TableStyle([
-                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                    ('LINEBELOW', (1,0), (1,0), 0.5, colors.black),
-                    ('LINEBELOW', (3,0), (3,0), 0.5, colors.black),
-                    ('SPAN', (0,1), (1,1)),
-                    ('PADDING', (0,0), (-1,-1), 4)
-                ]))
+                t_alumno.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('LINEBELOW', (1,0), (1,0), 0.5, colors.black), ('LINEBELOW', (3,0), (3,0), 0.5, colors.black), ('SPAN', (0,1), (1,1)), ('PADDING', (0,0), (-1,-1), 4)]))
                 story.append(t_alumno)
                 story.append(Spacer(1, 15))
 
@@ -347,7 +351,7 @@ def generar_reportes():
                     [Paragraph("PERIODO DE EVALUACIÓN", style_th), Paragraph("CAMPOS FORMATIVOS", style_th), "", "", "", Paragraph("LENGUA INDÍGENA", style_th), ""],
                     ["", Paragraph("LENGUAJES", style_th), Paragraph("SABERES Y PENSAMIENTO CIENTÍFICO", style_th), Paragraph("ÉTICA, NATURALEZA Y SOCIEDADES", style_th), Paragraph("DE LO HUMANO Y LO COMUNITARIO", style_th), "", ""],
                     [Paragraph("1°", style_td_bold), Paragraph(f"{t1_l:.1f}" if t1_l > 0 else "-", style_td), Paragraph(f"{t1_s:.1f}" if t1_s > 0 else "-", style_td), Paragraph(f"{t1_e:.1f}" if t1_e > 0 else "-", style_td), Paragraph(f"{t1_h:.1f}" if t1_h > 0 else "-", style_td), Paragraph("PROMEDIO FINAL DE GRADO", style_th), Paragraph(f"{promedio_final_grado:.1f}" if promedio_final_grado > 0 else "-", style_td_bold)],
-                    [Paragraph("2°", style_td_bold), Paragraph(f"{t2_l:.1f}" if t2_l > 0 else "-", style_td), Paragraph(f"{t2_s:.1f}" if t2_s > 0 else "-", style_td), Paragraph(f"{t2_e:.1f}" if t2_e > 0 else "-", style_td), Paragraph(f"{t2_h:.1f}" if t2_h > 0 else "-", style_td), Paragraph("ASISTENCIAS", style_th), Paragraph("190", style_td)],
+                    [Paragraph("2°", style_td_bold), Paragraph(f"{t2_l:.1f}" if t2_l > 0 else "-", style_td), Paragraph(f"{t2_s:.1f}" if t2_s > 0 else "-", style_td), Paragraph(f"{t2_e:.1f}" if t2_e > 0 else "-", style_td), Paragraph(f"{t2_h:.1f}" if t2_h > 0 else "-", style_td), Paragraph("ASISTENCIAS", style_th), Paragraph(str(total_asistencias_real), style_td)], # INYECTA ASISTENCIAS CALCULADAS REALES
                     [Paragraph("3°", style_td_bold), Paragraph(f"{t3_l:.1f}" if t3_l > 0 else "-", style_td), Paragraph(f"{t3_s:.1f}" if t3_s > 0 else "-", style_td), Paragraph(f"{t3_e:.1f}" if t3_e > 0 else "-", style_td), Paragraph(f"{t3_h:.1f}" if t3_h > 0 else "-", style_td), Paragraph("FOLIO", style_th), Paragraph("BE15251340178", style_td)],
                     [Paragraph("PROMEDIO FINAL", style_th), Paragraph(f"{f_l:.1f}" if f_l > 0 else "-", style_td_bold), Paragraph(f"{f_s:.1f}" if f_s > 0 else "-", style_td_bold), Paragraph(f"{f_e:.1f}" if f_e > 0 else "-", style_td_bold), Paragraph(f"{f_h:.1f}" if f_h > 0 else "-", style_td_bold), "", ""]
                 ]
