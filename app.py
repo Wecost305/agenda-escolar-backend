@@ -21,6 +21,7 @@ DATABASE_ALUMNOS_ID = os.environ.get('NOTION_DATABASE_ID')
 DATABASE_ASISTENCIAS_ID = os.environ.get('DATABASE_ASISTENCIAS_ID')
 DATABASE_PROYECTOS_ID = os.environ.get('DATABASE_PROYECTOS_ID')
 DATABASE_GRUPOS_ID = os.environ.get('DATABASE_GRUPOS_ID')
+DATABASE_CALENDARIO_ID = os.environ.get('DATABASE_CALENDARIO_ID')  # <- NUEVA VARIABLE
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -41,7 +42,7 @@ def home():
     return "Servidor Multiescuela de la Agenda Escolar Activo.", 200
 
 # ==========================================
-# RUTA: OBTENER LOS GRUPOS CONFIGURADOS
+# OBTENER LOS GRUPOS CONFIGURADOS
 # ==========================================
 @app.route('/obtener-grupos', methods=['GET'])
 def obtener_grupos():
@@ -101,6 +102,9 @@ def obtener_alumnos():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# REGISTRAR ASISTENCIA (NOTION + AIRTABLE)
+# ==========================================
 @app.route('/registrar-asistencia', methods=['POST'])
 def registrar_asistencia():
     try:
@@ -143,6 +147,9 @@ def registrar_asistencia():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# REGISTRAR CALIFICACIONES (NOTION + AIRTABLE)
+# ==========================================
 @app.route('/registrar-calificaciones', methods=['POST'])
 def registrar_calificaciones():
     try:
@@ -188,6 +195,50 @@ def registrar_calificaciones():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# NUEVA RUTA: REGISTRAR EVENTOS EN LA AGENDA
+# ==========================================
+@app.route('/registrar-evento', methods=['POST'])
+def registrar_evento():
+    try:
+        datos = request.json
+        evento = datos.get("evento")
+        fecha = datos.get("fecha")
+        tipo = datos.get("tipo")
+        trimestre = datos.get("trimestre")
+        notas = datos.get("notas", "")
+        grupo_id = datos.get("grupo_id")
+
+        if not grupo_id or not evento or not fecha:
+            return jsonify({"error": "Faltan parámetros obligatorios"}), 400
+
+        # Inyectar fila relacional en la base de datos de Calendario de Notion
+        payload = {
+            "parent": {"database_id": DATABASE_CALENDARIO_ID},
+            "properties": {
+                "Evento / Actividad": {"title": [{"text": {"content": evento}}]},
+                "Fecha": {"date": {"start": fecha}},
+                "Tipo de Evento": {"select": {"name": tipo}},
+                "Trimestre": {"select": {"name": trimestre}},
+                "Notas / Acuerdos": {"rich_text": [{"text": {"content": notas}}]},
+                "Grupo Relación": {"relation": [{"id": grupo_id}]},
+                "Cumplido / Concluido": {"checkbox": False}
+            }
+        }
+        
+        response = requests.post("https://api.notion.com/v1/pages", headers=NOTION_HEADERS, json=payload)
+        
+        if response.status_code == 200 or response.status_code == 201:
+            return jsonify({"status": "éxito"}), 200
+        else:
+            return jsonify({"error": f"Error de Notion: {response.text}"}), response.status_code
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ==========================================
+# GENERAR REPORTES CORREGIDO CON ASISTENCIAS
+# ==========================================
 @app.route('/generar-reportes', methods=['GET'])
 def generar_reportes():
     try:
@@ -197,7 +248,7 @@ def generar_reportes():
         if not grupo_id:
             return jsonify({"error": "Debe especificar un grupo_id"}), 400
 
-        # 1. Traer configuración del grupo desde Notion (Escuela, CCT, Turno y Ciclo Escolar)
+        # 1. Traer configuración del grupo
         url_grupo = f"https://api.notion.com/v1/pages/{grupo_id}"
         res_grupo = requests.get(url_grupo, headers=NOTION_HEADERS)
         if res_grupo.status_code != 200:
@@ -208,34 +259,29 @@ def generar_reportes():
         cct_val = props_grupo.get("CCT", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
         turno_val = props_grupo.get("Turno", {}).get("select", {}).get("name", "MATUTINO")
         grado_val = props_grupo.get("Grado y Grupo", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "1° A")
-        # NUEVO: Ciclo Escolar dinámico desde Notion
         ciclo_val = props_grupo.get("Ciclo Escolar", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "2026-2027")
 
-        # 2. Consultar únicamente alumnos del grupo seleccionado
+        # 2. Consultar alumnos del grupo
         url_alumnos = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
         payload_alumnos = {"filter": {"property": "Grupo Relación", "relation": {"contains": grupo_id}}}
         res_alumnos = requests.post(url_alumnos, headers=NOTION_HEADERS, json=payload_alumnos)
         alumnos_notion = res_alumnos.json().get("results", [])
 
-        # 3. Consultar la base de datos de asistencias completa para contar los días "Presente"
+        # 3. Consultar asistencias reales
         res_asistencias = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_ASISTENCIAS_ID}/query", headers=NOTION_HEADERS)
         asistencias_lista = res_asistencias.json().get("results", []) if res_asistencias.status_code == 200 else []
 
-        # Contabilizar asistencias reales por cada alumno
         mapa_asistencias = {}
         for asis in asistencias_lista:
             props_asis = asis.get("properties", {})
             rel_alum = props_asis.get("Alumno", {}).get("relation", [])
             if not rel_alum: continue
             alum_id_asis = rel_alum[0].get("id")
-            
             estatus_asis = props_asis.get("Estatus Asistencia", {}).get("select", {}).get("name", "")
-            
-            # Si el alumno asistió, sumamos 1 día al contador
             if "Presente" in estatus_asis:
                 mapa_asistencias[alum_id_asis] = mapa_asistencias.get(alum_id_asis, 0) + 1
 
-        # 4. Consultar proyectos para los promedios reales
+        # 4. Consultar proyectos
         res_proyectos = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_PROYECTOS_ID}/query", headers=NOTION_HEADERS)
         proyectos_lista = res_proyectos.json().get("results", []) if res_proyectos.status_code == 200 else []
 
@@ -276,9 +322,7 @@ def generar_reportes():
                 nombre = alum.get("properties", {}).get("Nombre Completo", {}).get("title", [{}])[0].get("text", {}).get("content", "ALUMNO")
                 curp = alum.get("properties", {}).get("CURP", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
 
-                # Obtener asistencias reales calculadas para este alumno (si no tiene, por defecto es 0)
                 total_asistencias_real = mapa_asistencias.get(alum_id, 0)
-
                 def promediar(lista): return sum(lista) / len(lista) if lista else 0.0
 
                 notas_alum = historico_notas.get(alum_id, {"Trimestre 1": {"L": [], "S": [], "E": [], "H": []}, "Trimestre 2": {"L": [], "S": [], "E": [], "H": []}, "Trimestre 3": {"L": [], "S": [], "E": [], "H": []}})
@@ -303,11 +347,9 @@ def generar_reportes():
                 promedios_trimestres_validos = [p for p in [t1_prom, t2_prom, t3_prom] if p > 0]
                 promedio_final_grado = sum(promedios_trimestres_validos) / len(promedios_trimestres_validos) if promedios_trimestres_validos else 0.0
 
-                # --- GENERAR CUERPO DEL REPORTE PDF ---
                 pdf_buffer = io.BytesIO()
                 doc = SimpleDocTemplate(pdf_buffer, pagesize=landscape(letter), rightMargin=30, leftMargin=30, topMargin=25, bottomMargin=25)
                 story = []
-                styles = getSampleStyleSheet()
                 
                 style_sep_izq = ParagraphStyle('SepIzq', fontName='Helvetica-Bold', fontSize=24, textColor=colors.HexColor('#621132'))
                 style_sep_sub = ParagraphStyle('SepSub', fontName='Helvetica', fontSize=7.5, textColor=colors.HexColor('#64748b'))
@@ -351,7 +393,7 @@ def generar_reportes():
                     [Paragraph("PERIODO DE EVALUACIÓN", style_th), Paragraph("CAMPOS FORMATIVOS", style_th), "", "", "", Paragraph("LENGUA INDÍGENA", style_th), ""],
                     ["", Paragraph("LENGUAJES", style_th), Paragraph("SABERES Y PENSAMIENTO CIENTÍFICO", style_th), Paragraph("ÉTICA, NATURALEZA Y SOCIEDADES", style_th), Paragraph("DE LO HUMANO Y LO COMUNITARIO", style_th), "", ""],
                     [Paragraph("1°", style_td_bold), Paragraph(f"{t1_l:.1f}" if t1_l > 0 else "-", style_td), Paragraph(f"{t1_s:.1f}" if t1_s > 0 else "-", style_td), Paragraph(f"{t1_e:.1f}" if t1_e > 0 else "-", style_td), Paragraph(f"{t1_h:.1f}" if t1_h > 0 else "-", style_td), Paragraph("PROMEDIO FINAL DE GRADO", style_th), Paragraph(f"{promedio_final_grado:.1f}" if promedio_final_grado > 0 else "-", style_td_bold)],
-                    [Paragraph("2°", style_td_bold), Paragraph(f"{t2_l:.1f}" if t2_l > 0 else "-", style_td), Paragraph(f"{t2_s:.1f}" if t2_s > 0 else "-", style_td), Paragraph(f"{t2_e:.1f}" if t2_e > 0 else "-", style_td), Paragraph(f"{t2_h:.1f}" if t2_h > 0 else "-", style_td), Paragraph("ASISTENCIAS", style_th), Paragraph(str(total_asistencias_real), style_td)], # INYECTA ASISTENCIAS CALCULADAS REALES
+                    [Paragraph("2°", style_td_bold), Paragraph(f"{t2_l:.1f}" if t2_l > 0 else "-", style_td), Paragraph(f"{t2_s:.1f}" if t2_s > 0 else "-", style_td), Paragraph(f"{t2_e:.1f}" if t2_e > 0 else "-", style_td), Paragraph(f"{t2_h:.1f}" if t2_h > 0 else "-", style_td), Paragraph("ASISTENCIAS", style_th), Paragraph(str(total_asistencias_real), style_td)],
                     [Paragraph("3°", style_td_bold), Paragraph(f"{t3_l:.1f}" if t3_l > 0 else "-", style_td), Paragraph(f"{t3_s:.1f}" if t3_s > 0 else "-", style_td), Paragraph(f"{t3_e:.1f}" if t3_e > 0 else "-", style_td), Paragraph(f"{t3_h:.1f}" if t3_h > 0 else "-", style_td), Paragraph("FOLIO", style_th), Paragraph("BE15251340178", style_td)],
                     [Paragraph("PROMEDIO FINAL", style_th), Paragraph(f"{f_l:.1f}" if f_l > 0 else "-", style_td_bold), Paragraph(f"{f_s:.1f}" if f_s > 0 else "-", style_td_bold), Paragraph(f"{f_e:.1f}" if f_e > 0 else "-", style_td_bold), Paragraph(f"{f_h:.1f}" if f_h > 0 else "-", style_td_bold), "", ""]
                 ]
