@@ -160,6 +160,7 @@ def registrar_calificaciones():
             if n_sabe is not None: properties["Saberes y Ciencias"] = {"number": n_sabe}
             if n_etic is not None: properties["Ética, Nat y Soc"] = {"number": n_etic}
             if n_huma is not None: properties["De lo Humano y Com"] = {"number": n_huma}
+            properties["Notas"] = {"rich_text": [{"text": {"content": nota}}]}
 
             requests.post(url_notion, headers=NOTION_HEADERS, json={"parent": {"database_id": DATABASE_PROYECTOS_ID}, "properties": properties})
 
