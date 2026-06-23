@@ -111,7 +111,7 @@ def registrar_asistencia():
             # --------------------------------------------------------
             # FLUJO B: INSERCIÓN EN AIRTABLE (RESPALDO EN PARALELO)
             # --------------------------------------------------------
-            url_airtable = f"https://api.airtable.com/v3/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
+            url_airtable = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
             payload_airtable = {
                 "fields": {
                     "Registro": f"{estatus} - {fecha}",
