@@ -196,9 +196,9 @@ def generar_reportes():
         grupo_id = request.args.get('grupo_id')
 
         if not grupo_id:
-            return jsonify({"error": "Debe especificar un grupo_id para las boletas"}), 400
+            return jsonify({"error": "Debe especificar un grupo_id"}), 400
 
-        # 1. Traer los datos institucionales específicos de ese grupo desde Notion
+        # 1. Traer configuración del grupo desde Notion
         url_grupo = f"https://api.notion.com/v1/pages/{grupo_id}"
         res_grupo = requests.get(url_grupo, headers=NOTION_HEADERS)
         if res_grupo.status_code != 200:
@@ -209,6 +209,7 @@ def generar_reportes():
         cct_val = props_grupo.get("CCT", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
         turno_val = props_grupo.get("Turno", {}).get("select", {}).get("name", "MATUTINO")
         grado_val = props_grupo.get("Grado y Grupo", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "1° A")
+        maestro_name = props_grupo.get("Nombre del Maestro", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "N/A")
 
         # 2. Consultar únicamente alumnos del grupo seleccionado
         url_alumnos = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
@@ -216,7 +217,7 @@ def generar_reportes():
         res_alumnos = requests.post(url_alumnos, headers=NOTION_HEADERS, json=payload_alumnos)
         alumnos_notion = res_alumnos.json().get("results", [])
 
-        # 3. Consultar todos los proyectos para los promedios anuales
+        # 3. Consultar proyectos para los promedios reales
         res_proyectos = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_PROYECTOS_ID}/query", headers=NOTION_HEADERS)
         proyectos_lista = res_proyectos.json().get("results", []) if res_proyectos.status_code == 200 else []
 
@@ -259,43 +260,65 @@ def generar_reportes():
                 t2_l, t2_s, t2_e, t2_h = promediar(notas_alum["Trimestre 2"]["L"]), promediar(notas_alum["Trimestre 2"]["S"]), promediar(notas_alum["Trimestre 2"]["E"]), promediar(notas_alum["Trimestre 2"]["H"])
                 t3_l, t3_s, t3_e, t3_h = promediar(notas_alum["Trimestre 3"]["L"]), promediar(notas_alum["Trimestre 3"]["S"]), promediar(notas_alum["Trimestre 3"]["E"]), promediar(notas_alum["Trimestre 3"]["H"])
 
-                f_l = promediar([t1_l, t2_l, t3_l]) if (t1_l or t2_l or t3_l) else 0.0
-                f_s = promediar([t1_s, t2_s, t3_s]) if (t1_s or t2_s or t3_s) else 0.0
-                f_e = promediar([t1_e, t2_e, t3_e]) if (t1_e or t2_e or t3_e) else 0.0
-                f_h = promediar([t1_h, t2_h, t3_h]) if (t1_h or t2_h or t3_h) else 0.0
-                promedio_final_grado = (f_l + f_s + f_e + f_h) / 4 if (f_l or f_s or f_e or f_h) else 0.0
+                t1_prom = (t1_l + t1_s + t1_e + t1_h) / 4 if (t1_l or t1_s or t1_e or t1_h) else 0.0
+                t2_prom = (t2_l + t2_s + t2_e + t2_h) / 4 if (t2_l or t2_s or t2_e or t2_h) else 0.0
+                t3_prom = (t3_l + t3_s + t3_e + t3_h) / 4 if (t3_l or t3_s or t3_e or t3_h) else 0.0
 
-                # --- REPORTE PDF EN FORMATO HORIZONTAL ---
+                # --- CORRECCIÓN MATEMÁTICA DEFINITIVA ---
+                # Calculamos los promedios finales por campo omitiendo periodos con 0.0
+                def calcular_promedio_final_campo(notas_periodos):
+                    validas = [n for n in notas_periodos if n > 0]
+                    return sum(validas) / len(validas) if validas else 0.0
+
+                f_l = calcular_promedio_final_campo([t1_l, t2_l, t3_l])
+                f_s = calcular_promedio_final_campo([t1_s, t2_s, t3_s])
+                f_e = calcular_promedio_final_campo([t1_e, t2_e, t3_e])
+                f_h = calcular_promedio_final_campo([t1_h, t2_h, t3_h])
+
+                # Promedio final cruzado real de grado
+                promedios_trimestres_validos = [p for p in [t1_prom, t2_prom, t3_prom] if p > 0]
+                promedio_final_grado = sum(promedios_trimestres_validos) / len(promedios_trimestres_validos) if promedios_trimestres_validos else 0.0
+
+                # --- REPORTE PDF HORIZONTAL (LANDSCAPE) ---
                 pdf_buffer = io.BytesIO()
                 doc = SimpleDocTemplate(pdf_buffer, pagesize=landscape(letter), rightMargin=30, leftMargin=30, topMargin=25, bottomMargin=25)
                 story = []
                 styles = getSampleStyleSheet()
                 
-                style_sep = ParagraphStyle('SepStyle', fontName='Helvetica-Bold', fontSize=22, textColor=colors.HexColor('#6b21a8'))
-                style_sub_sep = ParagraphStyle('SubSepStyle', fontName='Helvetica', fontSize=8, textColor=colors.HexColor('#64748b'))
-                style_sistema = ParagraphStyle('SistStyle', fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#1e293b'), alignment=1)
+                # Estilos visuales
+                style_sep_box = ParagraphStyle('SepBox', fontName='Helvetica-Bold', fontSize=14, textColor=colors.white, alignment=1)
+                style_sub_sep = ParagraphStyle('SubSepStyle', fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor('#621132'))
+                style_sistema = ParagraphStyle('SistStyle', fontName='Helvetica-Bold', fontSize=11, textColor=colors.HexColor('#1e293b'), alignment=1)
                 style_label = ParagraphStyle('LabelStyle', fontName='Helvetica', fontSize=8, textColor=colors.HexColor('#475569'))
-                style_value = ParagraphStyle('ValueStyle', fontName='Helvetica-Bold', fontSize=9, textColor=colors.HexColor('#000000'))
+                style_value = ParagraphStyle('ValueStyle', fontName='Helvetica-Bold', fontSize=9, textColor=colors.black)
                 style_th = ParagraphStyle('ThStyle', fontName='Helvetica-Bold', fontSize=7, textColor=colors.HexColor('#78350f'), alignment=1)
                 style_td = ParagraphStyle('TdStyle', fontName='Helvetica', fontSize=9, alignment=1)
                 style_td_bold = ParagraphStyle('TdBoldStyle', fontName='Helvetica-Bold', fontSize=9, alignment=1)
 
+                # DISEÑO DEL ESCUDO INSTITUCIONAL VECTORIAL (TABLA SIMULADA)
+                escudo_vectorial = Table([[Paragraph("EDUCACIÓN", style_sep_box)]], colWidths=[120], rowHeights=[28])
+                escudo_vectorial.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#621132')),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ]))
+
                 header_data = [
-                    [Paragraph("Educación", style_sep), Paragraph(f"SISTEMA EDUCATIVO NACIONAL<br/><b>ESTADO DE MÉXICO</b><br/>BOLETA DE EVALUACIÓN<br/>{grado_val} DE EDUCACIÓN PRIMARIA<br/>CICLO ESCOLAR 2026-2027", style_sistema)],
-                    [Paragraph("Secretaría de Educación Pública", style_sub_sep), Paragraph("", style_sub_sep)]
+                    [escudo_vectorial, Paragraph(f"SISTEMA EDUCATIVO NACIONAL<br/><b>ESTADO DE MÉXICO</b><br/>BOLETA DE EVALUACIÓN<br/>{grado_val} DE EDUCACIÓN PRIMARIA<br/>CICLO ESCOLAR 2026-2027", style_sistema)],
+                    [Paragraph("SECRETARÍA DE EDUCACIÓN PÚBLICA", style_sub_sep), Paragraph("", style_sistema)]
                 ]
-                t_header = Table(header_data, colWidths=[350, 370])
-                t_header.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('ALIGN', (1,0), (1,0), 'CENTER')]))
+                t_header = Table(header_data, colWidths=[200, 520])
+                t_header.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('ALIGN', (0,0), (0,0), 'LEFT')]))
                 story.append(t_header)
                 story.append(Spacer(1, 15))
 
-                # VARIABLES DINÁMICAS INYECTADAS DIRECTAMENTE DESDE NOTION
+                # GRID DE DATOS REDISEÑADO CON ETIQUETAS CORTAS Y MAESTRO
                 datos_alumno_grid = [
-                    [Paragraph("NOMBRE(S) Y APELLIDOS DE LA ALUMNA O DEL ALUMNO:", style_label), Paragraph(nombre, style_value), Paragraph("CURP:", style_label), Paragraph(curp, style_value)],
-                    [Paragraph(f"NOMBRE DE LA ESCUELA: {escuela_name}", style_label), Paragraph("", style_label), Paragraph(f"CCT: {cct_val}", style_label), Paragraph(f"TURNO: {turno_val}", style_label)]
+                    [Paragraph("ALUMNO(A):", style_label), Paragraph(nombre, style_value), Paragraph("CURP:", style_label), Paragraph(curp, style_value)],
+                    [Paragraph(f"ESCUELA: {escuela_name}", style_label), Paragraph(f"PROFESOR(A): {maestro_name}", style_label), Paragraph(f"CCT: {cct_val}", style_label), Paragraph(f"TURNO: {turno_val}", style_label)]
                 ]
-                t_alumno = Table(datos_alumno_grid, colWidths=[240, 240, 100, 140])
-                t_alumno.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('LINEBELOW', (1,0), (1,0), 0.5, colors.black), ('LINEBELOW', (3,0), (3,0), 0.5, colors.black), ('SPAN', (0,1), (1,1)), ('PADDING', (0,0), (-1,-1), 4)]))
+                t_alumno = Table(datos_alumno_grid, colWidths=[90, 310, 100, 220])
+                t_alumno.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('LINEBELOW', (1,0), (1,0), 0.5, colors.black), ('LINEBELOW', (3,0), (3,0), 0.5, colors.black), ('PADDING', (0,0), (-1,-1), 4)]))
                 story.append(t_alumno)
                 story.append(Spacer(1, 15))
 
