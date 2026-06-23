@@ -1,19 +1,16 @@
 import os
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import pandas as pd
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-import io
-import zipfile
 
 app = Flask(__name__)
 CORS(app)
 
-# Variables de Entorno de Notion
+# ==========================================
+# CONFIGURACIÓN DE VARIABLES DE ENTORNO
+# ==========================================
+# Variables de Notion
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
 DATABASE_ALUMNOS_ID = os.environ.get('NOTION_DATABASE_ID')
 DATABASE_ASISTENCIAS_ID = os.environ.get('DATABASE_ASISTENCIAS_ID')
@@ -24,9 +21,19 @@ NOTION_HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
+# Variables de Airtable
+AIRTABLE_TOKEN = os.environ.get('AIRTABLE_TOKEN')
+AIRTABLE_BASE_ID = os.environ.get('AIRTABLE_BASE_ID')
+AIRTABLE_TABLE_NAME = "Asistencias_Historico"  # Nombre exacto de tu tabla en Airtable
+
+AIRTABLE_HEADERS = {
+    "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+    "Content-Type": "application/json"
+}
+
 @app.route('/', methods=['GET'])
 def home():
-    return "Servidor de la Agenda Escolar Activo y Corriendo.", 200
+    return "Servidor de la Agenda Escolar Activo y Corriendo con Respaldo en Airtable.", 200
 
 @app.route('/obtener-alumnos', methods=['GET'])
 def obtener_alumnos():
@@ -59,11 +66,11 @@ def registrar_asistencia():
         fecha = datos.get("fecha")
         alumnos_lista = datos.get("alumnos", [])
 
-        # Consultamos los alumnos para obtener sus IDs internos
+        # 1. Consultamos los alumnos en Notion para obtener sus IDs internos (Page IDs)
         url_query = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
         response_query = requests.post(url_query, headers=NOTION_HEADERS)
         if response_query.status_code != 200:
-            return jsonify({"error": "No se pudo consultar la base de alumnos"}), 500
+            return jsonify({"error": "No se pudo consultar la base de alumnos en Notion"}), 500
             
         resultados = response_query.json().get("results", [])
         mapa_alumnos = {}
@@ -73,33 +80,52 @@ def registrar_asistencia():
             if nombre_tit:
                 mapa_alumnos[nombre_tit[0]["text"]["content"]] = alum.get("id")
 
+        # 2. Procesamos la asistencia de TODOS los alumnos
         for alumno in alumnos_lista:
-            estatus = alumno.get("estatus")
+            estatus = alumno.get("estatus")  # "Presente" o "Falta"
             nombre_alumno = alumno.get("nombre")
-            
-            if estatus == "Falta":
-                alumno_page_id = mapa_alumnos.get(nombre_alumno)
-                if not alumno_page_id:
-                    continue
+            motivo = alumno.get("motivo", "Ninguno") if estatus == "Falta" else "Ninguno"
+            nota = alumno.get("nota", "")
 
-                motivo = alumno.get("motivo", "Injustificada")
-                nota = alumno.get("nota", "")
+            alumno_page_id = mapa_alumnos.get(nombre_alumno)
+            if not alumno_page_id:
+                continue  # Si el alumno no existe en Notion, se lo salta
 
-                url_crear = "https://api.notion.com/v1/pages"
-                payload_asistencia = {
-                    "parent": { "database_id": DATABASE_ASISTENCIAS_ID },
-                    "properties": {
-                        "Registro": {"title": [{"text": {"content": f"Falta - {fecha}"}}]},
-                        "Alumno": {"relation": [{"id": alumno_page_id}]},
-                        "Fecha": {"date": {"start": fecha}},
-                        "Estatus Asistencia": {"select": {"name": "Falta"}},
-                        "Motivo Falta": {"select": {"name": motivo}},
-                        "Nota / Observación": {"rich_text": [{"text": {"content": nota}}]}
-                    }
+            # --------------------------------------------------------
+            # FLUJO A: INSERCIÓN EN NOTION (Para todos: Presentes y Faltas)
+            # --------------------------------------------------------
+            url_notion = "https://api.notion.com/v1/pages"
+            payload_notion = {
+                "parent": { "database_id": DATABASE_ASISTENCIAS_ID },
+                "properties": {
+                    "Registro": {"title": [{"text": {"content": f"{estatus} - {fecha}"}}]},
+                    "Alumno": {"relation": [{"id": alumno_page_id}]},
+                    "Fecha": {"date": {"start": fecha}},
+                    "Estatus Asistencia": {"select": {"name": estatus}},
+                    "Motivo Falta": {"select": {"name": motivo}},
+                    "Nota / Observación": {"rich_text": [{"text": {"content": nota}}]}
                 }
-                requests.post(url_crear, headers=NOTION_HEADERS, json=payload_asistencia)
+            }
+            requests.post(url_notion, headers=NOTION_HEADERS, json=payload_notion)
 
-        return jsonify({"status": "éxito", "mensaje": "Asistencia registrada"}), 200
+            # --------------------------------------------------------
+            # FLUJO B: INSERCIÓN EN AIRTABLE (RESPALDO EN PARALELO)
+            # --------------------------------------------------------
+            url_airtable = f"https://api.airtable.com/v3/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
+            payload_airtable = {
+                "fields": {
+                    "Registro": f"{estatus} - {fecha}",
+                    "Alumno": nombre_alumno,  # En el respaldo guardamos el nombre directo en texto plano
+                    "Fecha": fecha,
+                    "Estatus": estatus,
+                    "Motivo": motivo,
+                    "Nota": nota
+                }
+            }
+            # Enviamos a Airtable de forma silenciosa
+            requests.post(url_airtable, headers=AIRTABLE_HEADERS, json=payload_airtable)
+
+        return jsonify({"status": "éxito", "mensaje": "Asistencia guardada en Notion y respaldada en Airtable"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
