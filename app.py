@@ -221,8 +221,8 @@ def registrar_evento():
                 "Tipo de Evento": {"select": {"name": tipo}},
                 "Trimestre": {"select": {"name": trimestre}},
                 "Notas / Acuerdos": {"rich_text": [{"text": {"content": notas}}]},
-                "Grupo Relación": {"relation": [{"id": grupo_id}]},
-                "Cumplido / Concluido": {"checkbox": False}
+                "Grupo": {"relation": [{"id": grupo_id}]}  # <-- CORREGIDO: Cambiado de "Grupo Relación" a "Grupo"
+                # Removemos temporalmente "Cumplido / Concluido" para evitar que Notion lo rebote por sintaxis
             }
         }
         
