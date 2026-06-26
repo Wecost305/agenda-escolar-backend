@@ -419,7 +419,7 @@ def generar_reportes():
 # CARGA MASIVA DE ALUMNOS DESDE EXCEL/CSV
 # ==========================================
 def normalizar_clave(valor):
-    """Convierte encabezados como 'Nombre Completo' o 'Nombre_Completo' a una llave comparable."""
+    """Convierte encabezados o propiedades de Notion a una llave comparable."""
     import re
     import unicodedata
 
@@ -452,9 +452,21 @@ def obtener_por_alias(row, aliases, default=''):
 
 
 def normalizar_fecha(valor):
+    """Normaliza fechas reales, texto y seriales de Excel al formato YYYY-MM-DD."""
     texto = valor_limpio(valor, default='')
     if not texto:
         return None
+
+    # Caso frecuente en Excel: 42087 => 2015-03-24
+    try:
+        numero = float(texto)
+        if 20000 <= numero <= 80000:
+            fecha_excel = pd.to_datetime(numero, unit='D', origin='1899-12-30', errors='coerce')
+            if not pd.isna(fecha_excel):
+                return fecha_excel.date().isoformat()
+    except Exception:
+        pass
+
     fecha = pd.to_datetime(texto, errors='coerce', dayfirst=True)
     if pd.isna(fecha):
         return None
@@ -503,6 +515,122 @@ def leer_padron(file_storage):
     return df
 
 
+def obtener_schema_alumnos_notion():
+    """Lee la estructura real de la base Alumnos para usar los nombres exactos de propiedades."""
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}"
+    res = requests.get(url, headers=NOTION_HEADERS)
+    if res.status_code not in [200, 201]:
+        raise RuntimeError(f"No se pudo leer el schema de la base Alumnos en Notion: {res.status_code} - {res.text[:500]}")
+    return res.json().get("properties", {})
+
+
+def resolver_propiedad(notion_props, candidatos, tipo_esperado=None, requerida=False):
+    """
+    Devuelve el nombre exacto de la propiedad en Notion.
+    Esto evita fallas por acentos o por pequeñas diferencias:
+    Genero/Género, Nombre Tutor/Nombre de Tutor, Correo Electronico/Correo Electrónico.
+    """
+    if not notion_props:
+        if requerida:
+            raise ValueError("No se encontraron propiedades en la base de Alumnos de Notion.")
+        return None
+
+    # 1) Coincidencia exacta
+    for candidato in candidatos:
+        if candidato in notion_props:
+            if not tipo_esperado or notion_props[candidato].get("type") == tipo_esperado:
+                return candidato
+
+    # 2) Coincidencia normalizada sin acentos/espacios
+    lookup = {}
+    for nombre_real, meta in notion_props.items():
+        if tipo_esperado and meta.get("type") != tipo_esperado:
+            continue
+        lookup[normalizar_clave(nombre_real)] = nombre_real
+
+    for candidato in candidatos:
+        clave = normalizar_clave(candidato)
+        if clave in lookup:
+            return lookup[clave]
+
+    # 3) Coincidencia flexible por contención de palabras
+    candidatos_norm = [normalizar_clave(c) for c in candidatos]
+    for nombre_real, meta in notion_props.items():
+        if tipo_esperado and meta.get("type") != tipo_esperado:
+            continue
+        nombre_norm = normalizar_clave(nombre_real)
+        for candidato_norm in candidatos_norm:
+            if candidato_norm and (candidato_norm in nombre_norm or nombre_norm in candidato_norm):
+                return nombre_real
+
+    if requerida:
+        disponibles = ", ".join([f"{k} ({v.get('type')})" for k, v in notion_props.items()])
+        raise ValueError(
+            f"No se encontró en Notion una propiedad compatible con: {', '.join(candidatos)}. "
+            f"Propiedades disponibles: {disponibles}"
+        )
+
+    return None
+
+
+def construir_mapa_propiedades_alumnos(notion_props):
+    """Mapa de campos lógicos del padrón hacia los nombres reales de Notion."""
+    return {
+        "nombre": resolver_propiedad(
+            notion_props,
+            ["Nombre Completo", "Nombre_Completo", "Nombre del Alumno", "Alumno", "Nombre"],
+            "title",
+            requerida=True
+        ),
+        "curp": resolver_propiedad(
+            notion_props,
+            ["CURP"],
+            "rich_text"
+        ),
+        "genero": resolver_propiedad(
+            notion_props,
+            ["Género", "Genero", "Sexo"],
+            "select"
+        ),
+        "fecha_nacimiento": resolver_propiedad(
+            notion_props,
+            ["Fecha de Nacimiento", "Fecha Nacimiento", "Fecha_Nacimiento", "Nacimiento"],
+            "date"
+        ),
+        "tutor": resolver_propiedad(
+            notion_props,
+            ["Nombre de Tutor", "Nombre del Tutor", "Nombre Tutor", "Nombre_Tutor", "Tutor", "Padre/Madre/Tutor", "Padre Madre Tutor"],
+            "rich_text"
+        ),
+        "telefono": resolver_propiedad(
+            notion_props,
+            ["Teléfono de Contacto", "Telefono de Contacto", "Teléfono", "Telefono", "Celular"],
+            "phone_number"
+        ),
+        "correo": resolver_propiedad(
+            notion_props,
+            ["Correo Electrónico", "Correo Electronico", "Correo", "Email", "E-mail"],
+            "email"
+        ),
+        "estatus": (
+            resolver_propiedad(notion_props, ["Estatus", "Status"], "select")
+            or resolver_propiedad(notion_props, ["Estatus", "Status"], "status")
+        ),
+        "grupo": resolver_propiedad(
+            notion_props,
+            ["Grupo Relación", "Grupo Relacion", "Grupo", "Escuela Grupo"],
+            "relation",
+            requerida=True
+        )
+    }
+
+
+def agregar_propiedad_si_existe(properties, mapa_props, campo, valor_payload):
+    nombre_real = mapa_props.get(campo)
+    if nombre_real:
+        properties[nombre_real] = valor_payload
+
+
 @app.route('/cargar-alumnos', methods=['POST'])
 def cargar_alumnos():
     try:
@@ -523,6 +651,9 @@ def cargar_alumnos():
         if df.empty:
             return jsonify({"error": "El archivo no contiene filas para procesar"}), 400
 
+        notion_props = obtener_schema_alumnos_notion()
+        mapa_props = construir_mapa_propiedades_alumnos(notion_props)
+
         contador_exitos = 0
         omitidos = 0
         errores = []
@@ -531,7 +662,7 @@ def cargar_alumnos():
             'nombre': ['Nombre_Completo', 'Nombre Completo', 'Nombre del Alumno', 'Alumno', 'Nombre'],
             'curp': ['CURP'],
             'genero': ['Genero', 'Género', 'Sexo'],
-            'tutor': ['Nombre_Tutor', 'Nombre Tutor', 'Tutor', 'Padre/Madre/Tutor', 'Padre Madre Tutor'],
+            'tutor': ['Nombre_Tutor', 'Nombre Tutor', 'Nombre de Tutor', 'Nombre del Tutor', 'Tutor', 'Padre/Madre/Tutor', 'Padre Madre Tutor'],
             'correo': ['Correo', 'Correo Electronico', 'Correo Electrónico', 'Email', 'E-mail'],
             'fecha_nacimiento': ['Fecha_Nacimiento', 'Fecha Nacimiento', 'Fecha de Nacimiento', 'Nacimiento'],
             'telefono': ['Telefono', 'Teléfono', 'Telefono Contacto', 'Teléfono de Contacto', 'Celular']
@@ -555,19 +686,29 @@ def cargar_alumnos():
             tel_contacto = normalizar_telefono(obtener_por_alias(row, aliases['telefono'], default=''))
 
             properties = {
-                "Nombre Completo": {"title": [{"text": {"content": nombre}}]},
-                "CURP": {"rich_text": [{"text": {"content": curp}}]},
-                "Genero": {"select": {"name": genero}},
-                "Nombre Tutor": {"rich_text": [{"text": {"content": tutor}}]},
-                "Correo Électrónico": {"email": correo if correo else None},
-                "Estatus": {"select": {"name": "Activo"}},
-                "Grupo Relación": {"relation": [{"id": grupo_id}]}
+                mapa_props["nombre"]: {"title": [{"text": {"content": nombre}}]},
+                mapa_props["grupo"]: {"relation": [{"id": grupo_id}]}
             }
 
-            if fecha_nac:
-                properties["Fecha de Nacimiento"] = {"date": {"start": fecha_nac}}
-            if tel_contacto:
-                properties["Teléfono de Contacto"] = {"phone_number": tel_contacto}
+            agregar_propiedad_si_existe(properties, mapa_props, "curp", {"rich_text": [{"text": {"content": curp}}]})
+            agregar_propiedad_si_existe(properties, mapa_props, "genero", {"select": {"name": genero}})
+            agregar_propiedad_si_existe(properties, mapa_props, "tutor", {"rich_text": [{"text": {"content": tutor}}]})
+
+            if correo and mapa_props.get("correo"):
+                properties[mapa_props["correo"]] = {"email": correo}
+
+            if mapa_props.get("estatus"):
+                estatus_tipo = notion_props.get(mapa_props["estatus"], {}).get("type")
+                if estatus_tipo == "status":
+                    properties[mapa_props["estatus"]] = {"status": {"name": "Activo"}}
+                else:
+                    properties[mapa_props["estatus"]] = {"select": {"name": "Activo"}}
+
+            if fecha_nac and mapa_props.get("fecha_nacimiento"):
+                properties[mapa_props["fecha_nacimiento"]] = {"date": {"start": fecha_nac}}
+
+            if tel_contacto and mapa_props.get("telefono"):
+                properties[mapa_props["telefono"]] = {"phone_number": tel_contacto}
 
             payload = {
                 "parent": {"database_id": DATABASE_ALUMNOS_ID},
@@ -579,7 +720,7 @@ def cargar_alumnos():
                 contador_exitos += 1
             else:
                 omitidos += 1
-                detalle = res.text[:400]
+                detalle = res.text[:600]
                 errores.append(f"Fila {fila_excel} ({nombre}): Notion respondió {res.status_code} - {detalle}")
 
         return jsonify({
@@ -587,7 +728,9 @@ def cargar_alumnos():
             "registrados": contador_exitos,
             "omitidos": omitidos,
             "errores": errores[:20],
-            "columnas_detectadas": columnas_detectadas
+            "columnas_detectadas": columnas_detectadas,
+            "propiedades_notion_detectadas": list(notion_props.keys()),
+            "mapa_propiedades_usado": mapa_props
         }), 200
 
     except Exception as e:
