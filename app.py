@@ -415,74 +415,181 @@ def generar_reportes():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# CARGA MASIVA DE ALUMNOS DESDE EXCEL/CSV
+# ==========================================
+def normalizar_clave(valor):
+    """Convierte encabezados como 'Nombre Completo' o 'Nombre_Completo' a una llave comparable."""
+    import re
+    import unicodedata
+
+    texto = str(valor or '').strip().lower()
+    texto = unicodedata.normalize('NFKD', texto)
+    texto = ''.join(ch for ch in texto if not unicodedata.combining(ch))
+    texto = re.sub(r'[^a-z0-9]+', '_', texto)
+    return texto.strip('_')
+
+
+def valor_limpio(valor, default=''):
+    """Limpia valores vacíos/nan de pandas y devuelve texto seguro."""
+    if valor is None or pd.isna(valor):
+        return default
+    texto = str(valor).strip()
+    if texto.lower() in {'nan', 'none', 'nat', 'null'}:
+        return default
+    return texto
+
+
+def obtener_por_alias(row, aliases, default=''):
+    """Busca una celda usando varias opciones de nombre de columna."""
+    for alias in aliases:
+        clave = normalizar_clave(alias)
+        if clave in row:
+            valor = valor_limpio(row.get(clave), default=None)
+            if valor is not None and valor != '':
+                return valor
+    return default
+
+
+def normalizar_fecha(valor):
+    texto = valor_limpio(valor, default='')
+    if not texto:
+        return None
+    fecha = pd.to_datetime(texto, errors='coerce', dayfirst=True)
+    if pd.isna(fecha):
+        return None
+    return fecha.date().isoformat()
+
+
+def normalizar_telefono(valor):
+    texto = valor_limpio(valor, default='')
+    if not texto:
+        return None
+    try:
+        numero = float(texto)
+        if numero.is_integer():
+            return str(int(numero))
+    except Exception:
+        pass
+    return texto.replace('.0', '').strip()
+
+
+def normalizar_genero(valor):
+    texto = valor_limpio(valor, default='Hombre').strip().lower()
+    if texto.startswith(('f', 'mujer', 'niña', 'nina')):
+        return 'Mujer'
+    if texto.startswith(('m', 'hombre', 'niño', 'nino')):
+        return 'Hombre'
+    return 'Hombre'
+
+
+def leer_padron(file_storage):
+    """Lee xlsx/xls/csv y regresa un DataFrame con columnas normalizadas."""
+    filename = (file_storage.filename or '').lower()
+    file_storage.stream.seek(0)
+
+    if filename.endswith('.csv'):
+        try:
+            df = pd.read_csv(file_storage, dtype=str, encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            file_storage.stream.seek(0)
+            df = pd.read_csv(file_storage, dtype=str, encoding='latin-1')
+    elif filename.endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(file_storage, dtype=str)
+    else:
+        raise ValueError('Formato no soportado. Sube un archivo .xlsx, .xls o .csv')
+
+    df.columns = [normalizar_clave(c) for c in df.columns]
+    return df
+
+
 @app.route('/cargar-alumnos', methods=['POST'])
 def cargar_alumnos():
     try:
-        if 'file' not in request.files: 
+        if 'file' not in request.files:
             return jsonify({"error": "No se encontró ningún archivo"}), 400
-            
+
+        grupo_id = request.form.get('grupo_id', '').strip()
+        if not grupo_id:
+            return jsonify({"error": "Debes seleccionar una escuela / grupo antes de cargar el padrón"}), 400
+
+        if not DATABASE_ALUMNOS_ID or not NOTION_TOKEN:
+            return jsonify({"error": "Faltan variables de entorno de Notion en Render"}), 500
+
         file = request.files['file']
-        
-        # Intentar leer tanto si es Excel como si es CSV
-        if file.filename.endswith('.csv'):
-            df = pd.read_csv(file)
-        else:
-            df = pd.read_excel(file)
-            
-        # Limpiar espacios en blanco en los nombres de las columnas
-        df.columns = [c.strip() for c in df.columns]
+        df = leer_padron(file)
+
+        columnas_detectadas = list(df.columns)
+        if df.empty:
+            return jsonify({"error": "El archivo no contiene filas para procesar"}), 400
 
         contador_exitos = 0
+        omitidos = 0
+        errores = []
 
-        for index, row in df.iterrows():
-            try:
-                # Extraer datos con valores por defecto por si faltan en el archivo
-                nombre = str(row.get('Nombre_Completo', '')).strip()
-                curp = str(row.get('CURP', '')).strip()
-                genero = str(row.get('Genero', 'Hombre')).strip()
-                tutor = str(row.get('Nombre_Tutor', 'N/A')).strip()
-                correo = str(row.get('Correo', 'tutor@email.com')).strip()
-                
-                if not nombre or nombre == 'nan':
-                    continue # Saltar filas vacías
-                
-                # Tratar la fecha de nacimiento de forma segura
-                fecha_raw = row.get('Fecha_Nacimiento')
-                fecha_nac = str(fecha_raw).split(" ")[0] if pd.notna(fecha_raw) and str(fecha_raw) != 'nan' else None
-                
-                # Tratar el teléfono de forma segura
-                tel_raw = row.get('Telefono')
-                tel_contacto = None
-                if pd.notna(tel_raw) and str(tel_raw) != 'nan':
-                    tel_contacto = str(int(float(tel_raw))) if str(tel_raw).replace('.0','').isdigit() else str(tel_raw)
+        aliases = {
+            'nombre': ['Nombre_Completo', 'Nombre Completo', 'Nombre del Alumno', 'Alumno', 'Nombre'],
+            'curp': ['CURP'],
+            'genero': ['Genero', 'Género', 'Sexo'],
+            'tutor': ['Nombre_Tutor', 'Nombre Tutor', 'Tutor', 'Padre/Madre/Tutor', 'Padre Madre Tutor'],
+            'correo': ['Correo', 'Correo Electronico', 'Correo Electrónico', 'Email', 'E-mail'],
+            'fecha_nacimiento': ['Fecha_Nacimiento', 'Fecha Nacimiento', 'Fecha de Nacimiento', 'Nacimiento'],
+            'telefono': ['Telefono', 'Teléfono', 'Telefono Contacto', 'Teléfono de Contacto', 'Celular']
+        }
 
-                payload = {
-                    "parent": {"database_id": DATABASE_ALUMNOS_ID}, 
-                    "properties": {
-                        "Nombre Completo": {"title": [{"text": {"content": nombre}}]}, 
-                        "CURP": {"rich_text": [{"text": {"content": curp if curp != 'nan' else 'N/A'}}]}, 
-                        "Genero": {"select": {"name": genero}}, 
-                        "Nombre Tutor": {"rich_text": [{"text": {"content": tutor if tutor != 'nan' else 'N/A'}}]}, 
-                        "Correo Électrónico": {"email": correo if correo != 'nan' else None},
-                        "Estatus": {"select": {"name": "Activo"}}
-                    }
-                }
-                
-                # Agregar fecha y teléfono si existen
-                if fecha_nac:
-                    payload["properties"]["Fecha de Nacimiento"] = {"date": {"start": fecha_nac}}
-                if tel_contacto:
-                    payload["properties"]["Teléfono de Contacto"] = {"phone_number": tel_contacto}
-                
-                res = requests.post("https://api.notion.com/v1/pages", headers=NOTION_HEADERS, json=payload)
-                if res.status_code in [200, 201]:
-                    contador_exitos += 1
-                    
-            except Exception as row_error:
-                print(f"Error procesando la fila {index}: {str(row_error)}")
-                continue # Si falla una fila, sigue con el siguiente alumno en vez de romper todo
+        for index, raw_row in df.iterrows():
+            row = raw_row.to_dict()
+            fila_excel = int(index) + 2  # +2 porque la fila 1 son encabezados
 
-        return jsonify({"status": "éxito", "registrados": contador_exitos}), 200
+            nombre = obtener_por_alias(row, aliases['nombre'], default='')
+            if not nombre:
+                omitidos += 1
+                errores.append(f"Fila {fila_excel}: sin Nombre Completo")
+                continue
+
+            curp = obtener_por_alias(row, aliases['curp'], default='N/A') or 'N/A'
+            genero = normalizar_genero(obtener_por_alias(row, aliases['genero'], default='Hombre'))
+            tutor = obtener_por_alias(row, aliases['tutor'], default='N/A') or 'N/A'
+            correo = obtener_por_alias(row, aliases['correo'], default='')
+            fecha_nac = normalizar_fecha(obtener_por_alias(row, aliases['fecha_nacimiento'], default=''))
+            tel_contacto = normalizar_telefono(obtener_por_alias(row, aliases['telefono'], default=''))
+
+            properties = {
+                "Nombre Completo": {"title": [{"text": {"content": nombre}}]},
+                "CURP": {"rich_text": [{"text": {"content": curp}}]},
+                "Genero": {"select": {"name": genero}},
+                "Nombre Tutor": {"rich_text": [{"text": {"content": tutor}}]},
+                "Correo Électrónico": {"email": correo if correo else None},
+                "Estatus": {"select": {"name": "Activo"}},
+                "Grupo Relación": {"relation": [{"id": grupo_id}]}
+            }
+
+            if fecha_nac:
+                properties["Fecha de Nacimiento"] = {"date": {"start": fecha_nac}}
+            if tel_contacto:
+                properties["Teléfono de Contacto"] = {"phone_number": tel_contacto}
+
+            payload = {
+                "parent": {"database_id": DATABASE_ALUMNOS_ID},
+                "properties": properties
+            }
+
+            res = requests.post("https://api.notion.com/v1/pages", headers=NOTION_HEADERS, json=payload)
+            if res.status_code in [200, 201]:
+                contador_exitos += 1
+            else:
+                omitidos += 1
+                detalle = res.text[:400]
+                errores.append(f"Fila {fila_excel} ({nombre}): Notion respondió {res.status_code} - {detalle}")
+
+        return jsonify({
+            "status": "éxito",
+            "registrados": contador_exitos,
+            "omitidos": omitidos,
+            "errores": errores[:20],
+            "columnas_detectadas": columnas_detectadas
+        }), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
