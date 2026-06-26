@@ -236,13 +236,166 @@ def registrar_evento():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# ==========================================
+# UTILIDADES PARA CONSULTAS Y LECTURA DE NOTION
+# ==========================================
+def notion_query_all(database_id, payload=None):
+    """Consulta una base de datos de Notion y trae todas las páginas usando paginación."""
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    payload_base = dict(payload or {})
+    payload_base["page_size"] = 100
+
+    resultados = []
+    start_cursor = None
+
+    while True:
+        payload_envio = dict(payload_base)
+        if start_cursor:
+            payload_envio["start_cursor"] = start_cursor
+
+        response = requests.post(url, headers=NOTION_HEADERS, json=payload_envio)
+        if response.status_code != 200:
+            raise RuntimeError(f"Error de Notion al consultar base {database_id}: {response.text}")
+
+        data = response.json()
+        resultados.extend(data.get("results", []))
+
+        if not data.get("has_more"):
+            break
+        start_cursor = data.get("next_cursor")
+        if not start_cursor:
+            break
+
+    return resultados
+
+
+def extraer_texto_notion(prop):
+    """Extrae texto de propiedades comunes de Notion sin depender del tipo exacto."""
+    if not isinstance(prop, dict):
+        return ""
+
+    tipo = prop.get("type")
+
+    if tipo == "select":
+        return (prop.get("select") or {}).get("name", "")
+    if tipo == "status":
+        return (prop.get("status") or {}).get("name", "")
+    if tipo == "multi_select":
+        return " ".join(x.get("name", "") for x in prop.get("multi_select", []) if x.get("name"))
+    if tipo in ("title", "rich_text"):
+        return " ".join(x.get("plain_text") or x.get("text", {}).get("content", "") for x in prop.get(tipo, []))
+    if tipo == "number":
+        numero = prop.get("number")
+        return "" if numero is None else str(numero)
+    if tipo == "formula":
+        formula = prop.get("formula") or {}
+        formula_tipo = formula.get("type")
+        if formula_tipo == "string":
+            return formula.get("string") or ""
+        if formula_tipo == "number":
+            numero = formula.get("number")
+            return "" if numero is None else str(numero)
+    if tipo == "rollup":
+        rollup = prop.get("rollup") or {}
+        if rollup.get("type") == "array":
+            return " ".join(extraer_texto_notion(x) for x in rollup.get("array", []))
+
+    return ""
+
+
+def normalizar_texto_simple(valor):
+    """Normaliza texto para comparaciones flexibles de propiedades/periodos."""
+    import re
+    import unicodedata
+
+    texto = str(valor or "").strip().lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
+    texto = re.sub(r"[^a-z0-9]+", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def obtener_prop_por_alias(props, aliases):
+    """Busca una propiedad de Notion por alias, tolerando acentos y pequeñas diferencias."""
+    mapa = {normalizar_texto_simple(nombre): nombre for nombre in props.keys()}
+    for alias in aliases:
+        clave = normalizar_texto_simple(alias)
+        if clave in mapa:
+            return props.get(mapa[clave])
+    # Segunda pasada por contenido parcial controlado
+    for alias in aliases:
+        clave = normalizar_texto_simple(alias)
+        for clave_real, nombre_real in mapa.items():
+            if clave and (clave in clave_real or clave_real in clave):
+                return props.get(nombre_real)
+    return None
+
+
+def obtener_numero_por_alias(props, aliases):
+    """Lee una calificación aunque la propiedad sea number, formula o texto numérico."""
+    prop = obtener_prop_por_alias(props, aliases)
+    if not isinstance(prop, dict):
+        return None
+
+    tipo = prop.get("type")
+    if tipo == "number":
+        return prop.get("number")
+    if tipo == "formula":
+        formula = prop.get("formula") or {}
+        if formula.get("type") == "number":
+            return formula.get("number")
+
+    texto = extraer_texto_notion(prop).strip().replace(",", ".")
+    if not texto:
+        return None
+    try:
+        return float(texto)
+    except Exception:
+        return None
+
+
+def detectar_periodo_evaluacion(props):
+    """Detecta Trimestre 1/2/3 usando varios nombres posibles de propiedad y formato."""
+    prop_periodo = obtener_prop_por_alias(props, [
+        "Periodo", "Trimestre", "Periodo de evaluación", "Periodo Evaluacion",
+        "Evaluación", "Evaluacion", "Bimestre", "Momento"
+    ])
+    texto = normalizar_texto_simple(extraer_texto_notion(prop_periodo))
+
+    if not texto:
+        return "Trimestre 1"
+
+    tokens = set(texto.split())
+
+    if (
+        "3" in tokens or "iii" in tokens or "tercer" in texto or "tercero" in texto
+        or "trimestre 3" in texto or "trim 3" in texto or "t3" in tokens or "julio" in texto
+    ):
+        return "Trimestre 3"
+    if (
+        "2" in tokens or "ii" in tokens or "segundo" in texto
+        or "trimestre 2" in texto or "trim 2" in texto or "t2" in tokens or "marzo" in texto
+    ):
+        return "Trimestre 2"
+    if (
+        "1" in tokens or "i" in tokens or "primer" in texto or "primero" in texto
+        or "trimestre 1" in texto or "trim 1" in texto or "t1" in tokens or "noviembre" in texto
+    ):
+        return "Trimestre 1"
+
+    return "Trimestre 1"
+
+
+def formato_calificacion(valor):
+    return f"{valor:.1f}" if valor and valor > 0 else "-"
+
 # ==========================================
 # GENERAR REPORTES CORREGIDO CON ASISTENCIAS
 # ==========================================
 @app.route('/generar-reportes', methods=['GET'])
 def generar_reportes():
     try:
-        trimestre_solicitado = request.args.get('trimestre', 'Trimestre 1')
         grupo_id = request.args.get('grupo_id')
 
         if not grupo_id:
@@ -261,42 +414,39 @@ def generar_reportes():
         grado_val = props_grupo.get("Grado y Grupo", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "1° A")
         ciclo_val = props_grupo.get("Ciclo Escolar", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "2026-2027")
 
-        # 2. Consultar alumnos del grupo
-        url_alumnos = f"https://api.notion.com/v1/databases/{DATABASE_ALUMNOS_ID}/query"
-        payload_alumnos = {"filter": {"property": "Grupo Relación", "relation": {"contains": grupo_id}}}
-        res_alumnos = requests.post(url_alumnos, headers=NOTION_HEADERS, json=payload_alumnos)
-        alumnos_notion = res_alumnos.json().get("results", [])
+        # 2. Consultar TODOS los alumnos del grupo.
+        # Notion entrega máximo 100 registros por consulta; por eso usamos paginación.
+        payload_alumnos = {
+            "filter": {"property": "Grupo Relación", "relation": {"contains": grupo_id}},
+            "sorts": [{"property": "Nombre Completo", "direction": "ascending"}]
+        }
+        alumnos_notion = notion_query_all(DATABASE_ALUMNOS_ID, payload_alumnos)
 
-        # 3. Consultar asistencias reales
-        res_asistencias = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_ASISTENCIAS_ID}/query", headers=NOTION_HEADERS)
-        asistencias_lista = res_asistencias.json().get("results", []) if res_asistencias.status_code == 200 else []
+        # 3. Consultar TODAS las asistencias reales con paginación.
+        asistencias_lista = notion_query_all(DATABASE_ASISTENCIAS_ID)
 
         mapa_asistencias = {}
         for asis in asistencias_lista:
             props_asis = asis.get("properties", {})
             rel_alum = props_asis.get("Alumno", {}).get("relation", [])
-            if not rel_alum: continue
+            if not rel_alum:
+                continue
             alum_id_asis = rel_alum[0].get("id")
-            estatus_asis = props_asis.get("Estatus Asistencia", {}).get("select", {}).get("name", "")
-            if "Presente" in estatus_asis:
+            estatus_asis = extraer_texto_notion(props_asis.get("Estatus Asistencia", {}))
+            if "presente" in normalizar_texto_simple(estatus_asis):
                 mapa_asistencias[alum_id_asis] = mapa_asistencias.get(alum_id_asis, 0) + 1
 
-        # 4. Consultar proyectos
-        res_proyectos = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_PROYECTOS_ID}/query", headers=NOTION_HEADERS)
-        proyectos_lista = res_proyectos.json().get("results", []) if res_proyectos.status_code == 200 else []
+        # 4. Consultar TODOS los proyectos/calificaciones con paginación.
+        proyectos_lista = notion_query_all(DATABASE_PROYECTOS_ID)
 
         historico_notas = {}
         for proy in proyectos_lista:
             props = proy.get("properties", {})
             relacion_alumno = props.get("Alumno", {}).get("relation", [])
-            if not relacion_alumno: continue
+            if not relacion_alumno:
+                continue
             alum_id = relacion_alumno[0].get("id")
-            
-            periodo_raw = props.get("Periodo", {}).get("select", {}).get("name", "Trimestre 1")
-            if "Trimestre 1" in periodo_raw: periodo = "Trimestre 1"
-            elif "Trimestre 2" in periodo_raw: periodo = "Trimestre 2"
-            elif "Trimestre 3" in periodo_raw: periodo = "Trimestre 3"
-            else: periodo = "Trimestre 1"
+            periodo = detectar_periodo_evaluacion(props)
             
             if alum_id not in historico_notas:
                 historico_notas[alum_id] = {
@@ -305,15 +455,19 @@ def generar_reportes():
                     "Trimestre 3": {"L": [], "S": [], "E": [], "H": []}
                 }
                 
-            l_nota = props.get("Lenguajes", {}).get("number")
-            s_nota = props.get("Saberes y Ciencias", {}).get("number")
-            e_nota = props.get("Ética, Nat y Soc", {}).get("number")
-            h_nota = props.get("De lo Humano y Com", {}).get("number")
+            l_nota = obtener_numero_por_alias(props, ["Lenguajes", "Lenguaje"])
+            s_nota = obtener_numero_por_alias(props, ["Saberes y Ciencias", "Saberes y Pensamiento Científico", "Saberes", "Pensamiento Cientifico"])
+            e_nota = obtener_numero_por_alias(props, ["Ética, Nat y Soc", "Etica Nat y Soc", "Ética, Naturaleza y Sociedades", "Etica Naturaleza y Sociedades", "Ética", "Etica"])
+            h_nota = obtener_numero_por_alias(props, ["De lo Humano y Com", "De lo Humano y lo Comunitario", "Humano", "Comunitario"])
             
-            if l_nota is not None: historico_notas[alum_id][periodo]["L"].append(l_nota)
-            if s_nota is not None: historico_notas[alum_id][periodo]["S"].append(s_nota)
-            if e_nota is not None: historico_notas[alum_id][periodo]["E"].append(e_nota)
-            if h_nota is not None: historico_notas[alum_id][periodo]["H"].append(h_nota)
+            if l_nota is not None:
+                historico_notas[alum_id][periodo]["L"].append(float(l_nota))
+            if s_nota is not None:
+                historico_notas[alum_id][periodo]["S"].append(float(s_nota))
+            if e_nota is not None:
+                historico_notas[alum_id][periodo]["E"].append(float(e_nota))
+            if h_nota is not None:
+                historico_notas[alum_id][periodo]["H"].append(float(h_nota))
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -325,7 +479,11 @@ def generar_reportes():
                 total_asistencias_real = mapa_asistencias.get(alum_id, 0)
                 def promediar(lista): return sum(lista) / len(lista) if lista else 0.0
 
-                notas_alum = historico_notas.get(alum_id, {"Trimestre 1": {"L": [], "S": [], "E": [], "H": []}, "Trimestre 2": {"L": [], "S": [], "E": [], "H": []}, "Trimestre 3": {"L": [], "S": [], "E": [], "H": []}})
+                notas_alum = historico_notas.get(alum_id, {
+                    "Trimestre 1": {"L": [], "S": [], "E": [], "H": []},
+                    "Trimestre 2": {"L": [], "S": [], "E": [], "H": []},
+                    "Trimestre 3": {"L": [], "S": [], "E": [], "H": []}
+                })
                 
                 t1_l, t1_s, t1_e, t1_h = promediar(notas_alum["Trimestre 1"]["L"]), promediar(notas_alum["Trimestre 1"]["S"]), promediar(notas_alum["Trimestre 1"]["E"]), promediar(notas_alum["Trimestre 1"]["H"])
                 t2_l, t2_s, t2_e, t2_h = promediar(notas_alum["Trimestre 2"]["L"]), promediar(notas_alum["Trimestre 2"]["S"]), promediar(notas_alum["Trimestre 2"]["E"]), promediar(notas_alum["Trimestre 2"]["H"])
@@ -392,10 +550,10 @@ def generar_reportes():
                 matriz_data = [
                     [Paragraph("PERIODO DE EVALUACIÓN", style_th), Paragraph("CAMPOS FORMATIVOS", style_th), "", "", "", Paragraph("LENGUA INDÍGENA", style_th), ""],
                     ["", Paragraph("LENGUAJES", style_th), Paragraph("SABERES Y PENSAMIENTO CIENTÍFICO", style_th), Paragraph("ÉTICA, NATURALEZA Y SOCIEDADES", style_th), Paragraph("DE LO HUMANO Y LO COMUNITARIO", style_th), "", ""],
-                    [Paragraph("1°", style_td_bold), Paragraph(f"{t1_l:.1f}" if t1_l > 0 else "-", style_td), Paragraph(f"{t1_s:.1f}" if t1_s > 0 else "-", style_td), Paragraph(f"{t1_e:.1f}" if t1_e > 0 else "-", style_td), Paragraph(f"{t1_h:.1f}" if t1_h > 0 else "-", style_td), Paragraph("PROMEDIO FINAL DE GRADO", style_th), Paragraph(f"{promedio_final_grado:.1f}" if promedio_final_grado > 0 else "-", style_td_bold)],
-                    [Paragraph("2°", style_td_bold), Paragraph(f"{t2_l:.1f}" if t2_l > 0 else "-", style_td), Paragraph(f"{t2_s:.1f}" if t2_s > 0 else "-", style_td), Paragraph(f"{t2_e:.1f}" if t2_e > 0 else "-", style_td), Paragraph(f"{t2_h:.1f}" if t2_h > 0 else "-", style_td), Paragraph("ASISTENCIAS", style_th), Paragraph(str(total_asistencias_real), style_td)],
-                    [Paragraph("3°", style_td_bold), Paragraph(f"{t3_l:.1f}" if t3_l > 0 else "-", style_td), Paragraph(f"{t3_s:.1f}" if t3_s > 0 else "-", style_td), Paragraph(f"{t3_e:.1f}" if t3_e > 0 else "-", style_td), Paragraph(f"{t3_h:.1f}" if t3_h > 0 else "-", style_td), Paragraph("FOLIO", style_th), Paragraph("BE15251340178", style_td)],
-                    [Paragraph("PROMEDIO FINAL", style_th), Paragraph(f"{f_l:.1f}" if f_l > 0 else "-", style_td_bold), Paragraph(f"{f_s:.1f}" if f_s > 0 else "-", style_td_bold), Paragraph(f"{f_e:.1f}" if f_e > 0 else "-", style_td_bold), Paragraph(f"{f_h:.1f}" if f_h > 0 else "-", style_td_bold), "", ""]
+                    [Paragraph("1°", style_td_bold), Paragraph(formato_calificacion(t1_l), style_td), Paragraph(formato_calificacion(t1_s), style_td), Paragraph(formato_calificacion(t1_e), style_td), Paragraph(formato_calificacion(t1_h), style_td), Paragraph("PROMEDIO FINAL DE GRADO", style_th), Paragraph(formato_calificacion(promedio_final_grado), style_td_bold)],
+                    [Paragraph("2°", style_td_bold), Paragraph(formato_calificacion(t2_l), style_td), Paragraph(formato_calificacion(t2_s), style_td), Paragraph(formato_calificacion(t2_e), style_td), Paragraph(formato_calificacion(t2_h), style_td), Paragraph("ASISTENCIAS", style_th), Paragraph(str(total_asistencias_real), style_td)],
+                    [Paragraph("3°", style_td_bold), Paragraph(formato_calificacion(t3_l), style_td), Paragraph(formato_calificacion(t3_s), style_td), Paragraph(formato_calificacion(t3_e), style_td), Paragraph(formato_calificacion(t3_h), style_td), Paragraph("FOLIO", style_th), Paragraph("BE15251340178", style_td)],
+                    [Paragraph("PROMEDIO FINAL", style_th), Paragraph(formato_calificacion(f_l), style_td_bold), Paragraph(formato_calificacion(f_s), style_td_bold), Paragraph(formato_calificacion(f_e), style_td_bold), Paragraph(formato_calificacion(f_h), style_td_bold), "", ""]
                 ]
                 t_matriz = Table(matriz_data, colWidths=[90, 110, 110, 110, 110, 110, 80])
                 t_matriz.setStyle(TableStyle([('SPAN', (0,0), (0,1)), ('SPAN', (1,0), (4,0)), ('SPAN', (5,0), (6,1)), ('BACKGROUND', (0,0), (4,1), colors.HexColor('#fef08a')), ('BACKGROUND', (5,0), (6,1), colors.HexColor('#fde047')), ('BACKGROUND', (0,5), (4,5), colors.HexColor('#fef08a')), ('BACKGROUND', (5,2), (5,4), colors.HexColor('#fef08a')), ('BACKGROUND', (6,2), (6,2), colors.HexColor('#fde047')), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('PADDING', (0,0), (-1,-1), 6), ('GRID', (0,0), (4,5), 0.5, colors.HexColor('#94a3b8')), ('GRID', (5,2), (6,4), 0.5, colors.HexColor('#94a3b8'))]))
@@ -408,10 +566,11 @@ def generar_reportes():
 
                 doc.build(story)
                 pdf_buffer.seek(0)
-                zip_file.writestr(f"Boleta_{nombre.replace(' ', '_')}.pdf", pdf_buffer.getvalue())
+                nombre_archivo = "".join(ch for ch in nombre if ch.isalnum() or ch in (" ", "_", "-", ".")).strip().replace(" ", "_") or "ALUMNO"
+                zip_file.writestr(f"Boleta_{nombre_archivo}.pdf", pdf_buffer.getvalue())
 
         zip_buffer.seek(0)
-        return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name=f'Boletas_{trimestre_solicitado.replace(" ", "_")}.zip')
+        return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='Boletas_Completas.zip')
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
