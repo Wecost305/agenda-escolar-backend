@@ -418,15 +418,71 @@ def generar_reportes():
 @app.route('/cargar-alumnos', methods=['POST'])
 def cargar_alumnos():
     try:
-        if 'file' not in request.files: return jsonify({"error": "No se encontró ningún archivo"}), 400
+        if 'file' not in request.files: 
+            return jsonify({"error": "No se encontró ningún archivo"}), 400
+            
         file = request.files['file']
-        df = pd.read_excel(file)
+        
+        # Intentar leer tanto si es Excel como si es CSV
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_excel(file)
+            
+        # Limpiar espacios en blanco en los nombres de las columnas
+        df.columns = [c.strip() for c in df.columns]
+
+        contador_exitos = 0
+
         for index, row in df.iterrows():
-            fecha_nac = str(row['Fecha_Nacimiento']).split(" ")[0] if pd.notna(row['Fecha_Nacimiento']) else None
-            tel_contacto = str(int(row['Telefono'])) if pd.notna(row['Telefono']) and str(row['Telefono']).replace('.0','').isdigit() else str(row['Telefono']) if pd.notna(row['Telefono']) else None
-            payload = {"parent": {"database_id": DATABASE_ALUMNOS_ID}, "properties": {"Nombre Completo": {"title": [{"text": {"content": str(row['Nombre_Completo'])}}]}, "CURP": {"rich_text": [{"text": {"content": str(row['CURP'])}}]}, "Genero": {"select": {"name": str(row['Genero'])}}, "Fecha de Nacimiento": {"date": {"start": fecha_nac}}, "Nombre Tutor": {"rich_text": [{"text": {"content": str(row['Nombre_Tutor'])}}]}, "Teléfono de Contacto": {"phone_number": tel_contacto}, "Correo Électrónico": {"email": str(row['Correo'])}, "Estatus": {"select": {"name": "Activo"}}}}
-            requests.post("https://api.notion.com/v1/pages", headers=NOTION_HEADERS, json=payload)
-        return jsonify({"status": "éxito"}), 200
+            try:
+                # Extraer datos con valores por defecto por si faltan en el archivo
+                nombre = str(row.get('Nombre_Completo', '')).strip()
+                curp = str(row.get('CURP', '')).strip()
+                genero = str(row.get('Genero', 'Hombre')).strip()
+                tutor = str(row.get('Nombre_Tutor', 'N/A')).strip()
+                correo = str(row.get('Correo', 'tutor@email.com')).strip()
+                
+                if not nombre or nombre == 'nan':
+                    continue # Saltar filas vacías
+                
+                # Tratar la fecha de nacimiento de forma segura
+                fecha_raw = row.get('Fecha_Nacimiento')
+                fecha_nac = str(fecha_raw).split(" ")[0] if pd.notna(fecha_raw) and str(fecha_raw) != 'nan' else None
+                
+                # Tratar el teléfono de forma segura
+                tel_raw = row.get('Telefono')
+                tel_contacto = None
+                if pd.notna(tel_raw) and str(tel_raw) != 'nan':
+                    tel_contacto = str(int(float(tel_raw))) if str(tel_raw).replace('.0','').isdigit() else str(tel_raw)
+
+                payload = {
+                    "parent": {"database_id": DATABASE_ALUMNOS_ID}, 
+                    "properties": {
+                        "Nombre Completo": {"title": [{"text": {"content": nombre}}]}, 
+                        "CURP": {"rich_text": [{"text": {"content": curp if curp != 'nan' else 'N/A'}}]}, 
+                        "Genero": {"select": {"name": genero}}, 
+                        "Nombre Tutor": {"rich_text": [{"text": {"content": tutor if tutor != 'nan' else 'N/A'}}]}, 
+                        "Correo Électrónico": {"email": correo if correo != 'nan' else None},
+                        "Estatus": {"select": {"name": "Activo"}}
+                    }
+                }
+                
+                # Agregar fecha y teléfono si existen
+                if fecha_nac:
+                    payload["properties"]["Fecha de Nacimiento"] = {"date": {"start": fecha_nac}}
+                if tel_contacto:
+                    payload["properties"]["Teléfono de Contacto"] = {"phone_number": tel_contacto}
+                
+                res = requests.post("https://api.notion.com/v1/pages", headers=NOTION_HEADERS, json=payload)
+                if res.status_code in [200, 201]:
+                    contador_exitos += 1
+                    
+            except Exception as row_error:
+                print(f"Error procesando la fila {index}: {str(row_error)}")
+                continue # Si falla una fila, sigue con el siguiente alumno en vez de romper todo
+
+        return jsonify({"status": "éxito", "registrados": contador_exitos}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
